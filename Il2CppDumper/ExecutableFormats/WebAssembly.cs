@@ -57,9 +57,4 @@ namespace Il2CppDumper
             return new WebAssemblyMemory(stream, bssStart);
         }
     }
-
-    // WebAssemblyMemory также должен наследовать Il2Cpp и реализовывать GetArchitectureType
-    // Но он не наследует Il2Cpp напрямую. Il2Cpp создается из него.
-    // В Il2Cpp.cs наследником является WebAssemblyMemory.
-    // Поэтому GetArchitectureType нужно добавить в WebAssemblyMemory.cs
 }

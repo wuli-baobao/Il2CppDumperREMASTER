@@ -1,16 +1,18 @@
-﻿using Mono.Cecil;
-using Mono.Cecil.Cil;
-using Mono.Collections.Generic;
-// Используем пространства имен из Gee.External.Capstone
-using Gee.External.Capstone;
-using Gee.External.Capstone.Arm;
+﻿using Gee.External.Capstone.Arm;
 using Gee.External.Capstone.Arm64;
 using Gee.External.Capstone.X86;
+using Il2CppDumper.lifting;
+using Il2CppDumper.lifting.Operation;
+using Mono.Cecil;
+using Mono.Cecil.Cil;
+using Mono.Cecil.Rocks;
+using Mono.Collections.Generic;
+using Mono.CompilerServices.SymbolWriter;
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
-using Mono.Cecil.Rocks;
 
 namespace Il2CppDumper
 {
@@ -26,6 +28,7 @@ namespace Il2CppDumper
         private readonly MethodDefinition attributeAttribute;
         private readonly TypeReference stringType;
         private readonly TypeSystem typeSystem;
+        private readonly Dictionary<ulong, MethodDefinition> addressToMethodMap = new();
         private readonly Dictionary<int, FieldDefinition> fieldDefinitionDic = new();
         private readonly Dictionary<int, PropertyDefinition> propertyDefinitionDic = new();
         private readonly Dictionary<int, MethodDefinition> methodDefinitionDic = new();
@@ -257,284 +260,70 @@ namespace Il2CppDumper
 
                         if (methodDefinition.HasBody && typeDefinition.BaseType?.FullName != "System.MulticastDelegate")
                         {
-                            var ilprocessor = methodDefinition.Body.GetILProcessor();
-                            var bodyChanged = false;
-
-                            // Аннотации
                             var methodPointer = il2Cpp.GetMethodPointer(imageName, methodDef);
                             var methodRVA = methodPointer > 0 ? il2Cpp.GetRVA(methodPointer) : 0;
-                            var methodVA = methodPointer > 0 ? il2Cpp.MapVATR(methodPointer) : 0; // Используем MapVATR для получения VA из файла
+                            var arch = il2Cpp.GetArchitectureType(); // Переименовали переменную
 
-                            var methodFullNameBuilder = new System.Text.StringBuilder();
-                            methodFullNameBuilder.Append(typeDefinition.FullName).Append(".").Append(methodName);
-                            methodFullNameBuilder.Append("(");
-                            for(int pIdx = 0; pIdx < methodDef.parameterCount; ++pIdx)
+                            Console.WriteLine($"[Method Processing] Method: {methodDefinition.FullName}, Pointer: 0x{methodPointer:X}, RVA: 0x{methodRVA:X}, Architecture: {arch}");
+
+                            if (methodPointer > 0 && arch != ArchitectureType.Unknown)
                             {
-                                var paramDef = metadata.parameterDefs[methodDef.parameterStart + pIdx];
-                                var paramType = il2Cpp.types[paramDef.typeIndex];
-                                methodFullNameBuilder.Append(executor.GetTypeName(paramType, true, true)); // Используем полное имя для типов параметров
-                                if (pIdx < methodDef.parameterCount - 1)
-                                    methodFullNameBuilder.Append(", ");
-                            }
-                            methodFullNameBuilder.Append(")");
-
-                            List<string> comments = new List<string>
-                            {
-                                $"Method: {methodFullNameBuilder.ToString()}",
-                                $"Method Token: 0x{methodDef.token:X}",
-                                $"Method Address RVA: 0x{methodRVA:X}, VA: 0x{methodVA:X}", // VA может быть неточным если базовый адрес не тот
-                            };
-
-                            // Гипотетический вызов для получения информации о вызываемых методах
-                            // List<string> calledMethods = GetCalledMethodsInfo(methodDef, imageName, methodPointer);
-                            // if (calledMethods.Any())
-                            // {
-                            //    comments.Add("Calls:");
-                            //    foreach (var calledMethod in calledMethods)
-                            //    {
-                            //        comments.Add($"  - {calledMethod}");
-                            //    }
-                            // }
-                            // Пока оставим заглушку, так как GetCalledMethodsInfo не реализован
-                            // comments.Add("Calls: (Analysis not yet implemented)"); // Будет заменено ниже
-
-                            // --- Начало кода для дизассемблирования ---
-                            byte[] codeBytes = null;
-                            uint readMethodSize = 0; // Размер для чтения
-                            ArchitectureType architecture = this.il2Cpp.GetArchitectureType();
-
-                            if (methodPointer > 0 && architecture != ArchitectureType.Unknown)
-                            {
-                                var sortedRVAs = this.executor.GetSortedFunctionRVAs();
+                                // Получаем размер метода
+                                uint readMethodSize = 0;
+                                var sortedRVAs = executor.GetSortedFunctionRVAs();
                                 if (Il2CppExecutor.TryGetMethodSize(methodRVA, sortedRVAs, out var determinedSize) && determinedSize > 0)
                                 {
                                     readMethodSize = determinedSize;
                                 }
-                                else
-                                {
-                                    // Если размер не определен (например, последний метод или ошибка),
-                                    // можно попробовать прочитать фиксированный блок или ничего не делать.
-                                    // Для начала, если размер не определен точно, не будем дизассемблировать.
-                                    // Позже можно установить readMethodSize = DEFAULT_DISASM_SIZE (e.g. 256 bytes)
-                                }
+
+                                Console.WriteLine($"[Method Processing] Determined method size: {readMethodSize} bytes");
 
                                 if (readMethodSize > 0)
                                 {
-                                    const uint maxReasonableSize = 8192; // Увеличим до 8KB
-                                    if (readMethodSize > maxReasonableSize)
-                                    {
-                                        //Console.WriteLine($"[DummyAssemblyGenerator] Method size {readMethodSize} for {methodFullNameBuilder} at RVA 0x{methodRVA:X} is too large, capping at {maxReasonableSize}.");
-                                        readMethodSize = maxReasonableSize;
-                                    }
-
                                     try
                                     {
-                                        ulong fileOffset = this.il2Cpp.MapVATR(methodPointer);
-                                        if (fileOffset > 0 || (methodPointer == 0 && fileOffset == 0) ) // fileOffset может быть 0 для VA=0
-                                        {
-                                            // Добавим проверку, что fileOffset + readMethodSize не выходит за пределы файла, если это возможно
-                                            // long fileSize = this.il2Cpp.Length;
-                                            // if (fileOffset + readMethodSize > (ulong)fileSize) {
-                                            //     readMethodSize = (uint)(fileSize - (long)fileOffset);
-                                            //     if (readMethodSize <=0) codeBytes = Array.Empty<byte>();
-                                            // }
+                                        ulong fileOffset = il2Cpp.MapVATR(methodPointer);
+                                        Console.WriteLine($"[Method Processing] File offset: 0x{fileOffset:X}");
 
-                                            if (readMethodSize > 0)
-                                            {
-                                                lock(this.il2Cpp)
-                                                {
-                                                    this.il2Cpp.Position = fileOffset;
-                                                    codeBytes = this.il2Cpp.ReadBytes((int)readMethodSize);
-                                                }
-                                            }
-                                            else if (readMethodSize == 0 && fileOffset > 0) // Если размер получился 0, но есть смещение
-                                            {
-                                                codeBytes = Array.Empty<byte>();
-                                            }
-                                        }
-                                        else if (methodPointer > 0)
+                                        if (fileOffset > 0)
                                         {
-                                           //Console.WriteLine($"[DummyAssemblyGenerator] Failed to map VA 0x{methodPointer:X} to file offset for method {methodFullNameBuilder}. Skipping disassembly.");
+                                            byte[] methodCodeBytes = null; // Переименовали переменную
+
+                                            // Читаем байты метода
+                                            lock (il2Cpp)
+                                            {
+                                                il2Cpp.Position = fileOffset;
+                                                methodCodeBytes = il2Cpp.ReadBytes((int)readMethodSize);
+                                            }
+
+                                            Console.WriteLine($"[Method Processing] Read {methodCodeBytes.Length} bytes from file");
+
+                                            // Генерируем тело метода
+                                            GenerateMethodBody(methodDefinition, methodCodeBytes, methodPointer, arch);
+                                        }
+                                        else
+                                        {
+                                            Console.WriteLine($"[Method Processing] Invalid file offset for method {methodDefinition.FullName}");
+                                            GenerateFallbackBody(methodDefinition, "Invalid file offset");
                                         }
                                     }
                                     catch (Exception ex)
                                     {
-                                       //Console.WriteLine($"[DummyAssemblyGenerator] Error reading bytes for method {methodFullNameBuilder} at VA 0x{methodPointer:X}: {ex.Message}");
-                                        codeBytes = null;
+                                        Console.WriteLine($"[Method Processing] Error reading bytes for {methodDefinition.FullName}: {ex}");
+                                        GenerateFallbackBody(methodDefinition, $"Error reading method bytes: {ex.Message}");
                                     }
-                                }
-                            }
-
-                            List<DisassembledInstruction> disassembledInstructions = null;
-                            if (codeBytes != null && codeBytes.Length > 0 && architecture != ArchitectureType.Unknown)
-                            {
-                                disassembledInstructions = MethodDisassembler.Disassemble(codeBytes, methodPointer, architecture);
-                            }
-
-                            List<string> assemblyListing = new List<string>();
-                            List<string> calledMethodsAnalysis = new List<string>(); // Для анализа вызовов
-                            const int maxInstructionsToShow = 25;
-
-                            if (disassembledInstructions != null && disassembledInstructions.Any())
-                            {
-                                assemblyListing.Add("Assembly Listing (up to " + maxInstructionsToShow + " instructions or first return):");
-                                bool retFound = false;
-                                for (int k = 0; k < disassembledInstructions.Count && k < maxInstructionsToShow && !retFound; ++k)
-                                {
-                                    var instr = disassembledInstructions[k];
-                                    assemblyListing.Add($"  {instr.ToString()}");
-                                    if (instr.Mnemonic.StartsWith("ret", StringComparison.OrdinalIgnoreCase))
-                                    {
-                                        retFound = true;
-                                    }
-
-                                    // Анализ вызовов с использованием Gee.External.Capstone
-                                    bool isCallInstruction = instr.Mnemonic.Equals("call", StringComparison.OrdinalIgnoreCase) ||
-                                                             instr.Mnemonic.Equals("bl", StringComparison.OrdinalIgnoreCase) ||
-                                                             instr.Mnemonic.Equals("blx", StringComparison.OrdinalIgnoreCase);
-
-                                    if (isCallInstruction && instr.PlatformSpecificInstruction != null)
-                                    {
-                                        ulong targetVa = 0;
-                                        string callTypeInfo = "";
-
-                                        if (instr.PlatformSpecificInstruction is X86Instruction x86Instr)
-                                        {
-                                            var x86Details = x86Instr.Details;
-                                            if (x86Details != null && x86Details.Operands.Length > 0)
-                                            {
-                                                var op = x86Details.Operands[0];
-                                                if (op.Type == X86OperandType.Immediate)
-                                                {
-                                                    targetVa = (ulong)op.Immediate; 
-                                                    callTypeInfo = " (direct imm)";
-                                                }
-                                                else if (op.Type == X86OperandType.Memory)
-                                                {
-                                                    if (op.Memory.Base == null &&  
-                                                        op.Memory.Index == null &&
-                                                        op.Memory.Displacement != 0)
-                                                    {
-                                                        callTypeInfo = $" (indirect via mem 0x{op.Memory.Displacement:X})";
-                                                    }
-                                                    else
-                                                    {
-                                                        callTypeInfo = " (indirect mem)";
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        else if (instr.PlatformSpecificInstruction is ArmInstruction armInstr)
-                                        {
-                                            var armDetails = armInstr.Details;
-                                            if (armDetails != null && armDetails.Operands.Length > 0)
-                                            {
-                                                var op = armDetails.Operands[0];
-                                                if (op.Type == ArmOperandType.Immediate)
-                                                {
-                                                    targetVa = (ulong)op.ShiftValue;
-                                                    callTypeInfo = " (branch)";
-                                                }
-                                            }
-                                        }
-                                        else if (instr.PlatformSpecificInstruction is Arm64Instruction arm64Instr)
-                                        {
-                                            var arm64Details = arm64Instr.Details;
-                                            if (arm64Details != null && arm64Details.Operands.Length > 0)
-                                            {
-                                                var op = arm64Details.Operands[0];
-                                                if (op.Type == Arm64OperandType.Immediate)
-                                                {
-                                                    targetVa = (ulong)op.ShiftValue;
-                                                    callTypeInfo = " (branch)";
-                                                }
-                                            }
-                                        }
-
-                                        if (targetVa != 0)
-                                        {
-                                            calledMethodsAnalysis.Add($"  -> Calls VA: 0x{targetVa:X}{callTypeInfo}");
-                                        }
-                                        else if (!string.IsNullOrEmpty(callTypeInfo))
-                                        {
-                                             calledMethodsAnalysis.Add($"  -> {instr.Mnemonic}{callTypeInfo} (target VA unresolved)");
-                                        }
-                                    }
-                                }
-                            }
-                            else if (methodPointer > 0 && architecture != ArchitectureType.Unknown)
-                            {
-                                if (readMethodSize == 0 && codeBytes == null)
-                                {
-                                    assemblyListing.Add("  (Could not determine method size for disassembly)");
-                                }
-                                else if (codeBytes == null)
-                                {
-                                     assemblyListing.Add("  (Could not read method bytes for disassembly)");
                                 }
                                 else
                                 {
-                                    assemblyListing.Add("  (No instructions disassembled or method is empty)");
+                                    Console.WriteLine($"[Method Processing] Could not determine method size for {methodDefinition.FullName}");
+                                    GenerateFallbackBody(methodDefinition, "Could not determine method size");
                                 }
-                            }
-
-                            if (assemblyListing.Any())
-                            {
-                                comments.AddRange(assemblyListing);
-                            }
-
-                            // Обновленная заглушка/результат для вызовов
-                            if (calledMethodsAnalysis.Any()) // Если бы анализ вызовов был реализован
-                            {
-                                comments.Add("Identified Calls:");
-                                comments.AddRange(calledMethodsAnalysis);
                             }
                             else
                             {
-                                comments.Add("Calls: (Call analysis not yet implemented or no calls identified)");
-                            }
-                            // --- Конец кода для дизассемблирования ---
-
-                            comments.Add("Body not decompiled by Il2CppReanimator.");
-
-                            // Добавляем комментарии как Nop инструкции (для dnSpy и других декомпиляторов)
-                            // dnSpy не показывает комментарии к инструкциям напрямую, лучше использовать строковые литералы или исключения.
-                            // Вместо Nop, будем формировать сообщение для исключения.
-
-                            string exceptionMessage = string.Join(Environment.NewLine, comments);
-
-                            // Используем methodDefinition.Module для импорта ссылок
-                            var systemNotImplementedExceptionRef = methodDefinition.Module.ImportReference(typeof(NotImplementedException));
-                            // Для Resolve() лучше импортировать конструктор напрямую, если известен его тип
-                            var notImplementedCtorRef = methodDefinition.Module.ImportReference(
-                                typeof(NotImplementedException).GetConstructor(new Type[] { typeof(string) })
-                            );
-
-                            ilprocessor.Append(ilprocessor.Create(OpCodes.Ldstr, exceptionMessage));
-                            ilprocessor.Append(ilprocessor.Create(OpCodes.Newobj, notImplementedCtorRef)); // Исправлено на notImplementedCtorRef
-                            ilprocessor.Append(ilprocessor.Create(OpCodes.Throw));
-                            bodyChanged = true;
-
-                            if (!bodyChanged) // Если вдруг тело не изменили (не должно случиться здесь)
-                            {
-                                if (returnType.FullName == "System.Void")
-                                {
-                                    ilprocessor.Append(ilprocessor.Create(OpCodes.Ret));
-                                }
-                                else if (returnType.IsValueType)
-                                {
-                                    var variable = new VariableDefinition(returnType);
-                                    methodDefinition.Body.Variables.Add(variable);
-                                    ilprocessor.Append(ilprocessor.Create(OpCodes.Ldloca_S, variable));
-                                    ilprocessor.Append(ilprocessor.Create(OpCodes.Initobj, returnType));
-                                    ilprocessor.Append(ilprocessor.Create(OpCodes.Ldloc_0));
-                                    ilprocessor.Append(ilprocessor.Create(OpCodes.Ret));
-                                }
-                                else
-                                {
-                                    ilprocessor.Append(ilprocessor.Create(OpCodes.Ldnull));
-                                    ilprocessor.Append(ilprocessor.Create(OpCodes.Ret));
-                                }
+                                string reason = methodPointer <= 0 ? "Method pointer not available" : "Unknown architecture";
+                                Console.WriteLine($"[Method Processing] Skipping {methodDefinition.FullName}: {reason}");
+                                GenerateFallbackBody(methodDefinition, reason);
                             }
                         }
                         methodDefinitionDic.Add(i, methodDefinition);
@@ -710,6 +499,36 @@ namespace Il2CppDumper
                             var eventDefinition = eventDefinitionDic[i];
                             //eventAttribute
                             CreateCustomAttribute(imageDef, eventDef.customAttributeIndex, eventDef.token, typeDefinition.Module, eventDefinition.CustomAttributes);
+                        }
+                    }
+                }
+            }
+        }
+
+        private void BuildAddressMap()
+        {
+            foreach (var assembly in Assemblies)
+            {
+                foreach (var module in assembly.Modules)
+                {
+                    foreach (var type in module.Types)
+                    {
+                        foreach (var method in type.Methods)
+                        {
+                            var addressAttr = method.CustomAttributes
+                                .FirstOrDefault(a => a.AttributeType.Name == "AddressAttribute");
+
+                            if (addressAttr != null)
+                            {
+                                var vaField = addressAttr.Fields.FirstOrDefault(f => f.Name == "VA");
+                                if (vaField.Argument.Value is string vaStr)
+                                {
+                                    if (ulong.TryParse(vaStr?.Substring(2), NumberStyles.HexNumber, null, out var va))
+                                    {
+                                        addressToMethodMap[va] = method;
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -919,6 +738,69 @@ namespace Il2CppDumper
             return false;
         }
 
+        private void GenerateMethodBody(MethodDefinition methodDefinition, byte[] codeBytes, ulong methodPointer, ArchitectureType architecture)
+        {
+            try
+            {
+                var ilprocessor = methodDefinition.Body.GetILProcessor();
+                ilprocessor.Body.Instructions.Clear(); // Очищаем существующие инструкции (если есть)
+                ilprocessor.Body.Variables.Clear();
+                ilprocessor.Body.ExceptionHandlers.Clear();
+
+                Console.WriteLine($"[GenerateMethodBody] Starting for method: {methodDefinition.FullName}");
+
+                // 1. Дизассемблирование
+                Console.WriteLine($"[GenerateMethodBody] Disassembling {codeBytes.Length} bytes for method {methodDefinition.FullName} at VA 0x{methodPointer:X}");
+                var disassembledInstructions = MethodDisassembler.Disassemble(codeBytes, methodPointer, architecture);
+
+                if (disassembledInstructions == null || !disassembledInstructions.Any())
+                {
+                    Console.WriteLine($"[GenerateMethodBody] Disassembly failed or no instructions for {methodDefinition.FullName}");
+                    ilprocessor.Emit(OpCodes.Ldstr, "Failed to disassemble method");
+                    ilprocessor.Emit(OpCodes.Newobj, methodDefinition.Module.ImportReference(
+                        typeof(NotImplementedException).GetConstructor(new[] { typeof(string) })));
+                    ilprocessor.Emit(OpCodes.Throw);
+                    return;
+                }
+
+                Console.WriteLine($"[GenerateMethodBody] Disassembled {disassembledInstructions.Count} instructions for {methodDefinition.FullName}");
+
+                // 2. Лифтинг в промежуточное представление
+                Console.WriteLine($"[GenerateMethodBody] Lifting IR for {methodDefinition.FullName}");
+                var lifter = new Lifter(methodDefinition.Module);
+                var liftedOperations = lifter.Lift(disassembledInstructions);
+
+                Console.WriteLine($"[GenerateMethodBody] Lifted to {liftedOperations.Count} IR operations for {methodDefinition.FullName}");
+
+                // 3. Генерация CIL из промежуточного представления
+                Console.WriteLine($"[GenerateMethodBody] Generating CIL for {methodDefinition.FullName}");
+                var cilGenerator = new CilGenerator(ilprocessor, methodDefinition);
+                cilGenerator.Generate(liftedOperations);
+
+                Console.WriteLine($"[GenerateMethodBody] Successfully generated CIL for {methodDefinition.FullName}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[GenerateMethodBody] Error generating method body for {methodDefinition.FullName}: {ex}");
+
+                // Fallback - генерируем заглушку
+                var ilprocessor = methodDefinition.Body.GetILProcessor();
+                ilprocessor.Body.Instructions.Clear();
+                ilprocessor.Emit(OpCodes.Ldstr, $"Error generating method: {ex.Message}");
+                ilprocessor.Emit(OpCodes.Newobj, methodDefinition.Module.ImportReference(
+                    typeof(NotImplementedException).GetConstructor(new[] { typeof(string) })));
+                ilprocessor.Emit(OpCodes.Throw);
+            }
+        }
+        private void GenerateFallbackBody(MethodDefinition methodDefinition, string errorMessage)
+        {
+            var ilProc = methodDefinition.Body.GetILProcessor();
+            ilProc.Body.Instructions.Clear();
+            ilProc.Emit(OpCodes.Ldstr, $"Method generation failed: {errorMessage}. Method: {methodDefinition.FullName}");
+            ilProc.Emit(OpCodes.Newobj, methodDefinition.Module.ImportReference(
+                typeof(NotImplementedException).GetConstructor(new[] { typeof(string) })));
+            ilProc.Emit(OpCodes.Throw);
+        }
         private GenericParameter CreateGenericParameter(Il2CppGenericParameter param, IGenericParameterProvider iGenericParameterProvider)
         {
             if (!genericParameterDic.TryGetValue(param, out var genericParameter))
