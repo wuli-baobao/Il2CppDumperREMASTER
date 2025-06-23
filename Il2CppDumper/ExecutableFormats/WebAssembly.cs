@@ -63,20 +63,3 @@ namespace Il2CppDumper
     // В Il2Cpp.cs наследником является WebAssemblyMemory.
     // Поэтому GetArchitectureType нужно добавить в WebAssemblyMemory.cs
 }
-
-namespace Il2CppDumper // Убедимся, что WebAssemblyMemory в правильном namespace для ArchitectureType
-{
-    public sealed partial class WebAssemblyMemory : Il2Cpp // Сделаем его partial и добавим реализацию
-    {
-        public override ArchitectureType GetArchitectureType()
-        {
-            // WebAssembly сама по себе не является нативной архитектурой, которую Capstone дизассемблирует напрямую.
-            // Если код Il2Cpp был скомпилирован в WASM, то это специфичный байт-код.
-            // Если это AOT-скомпилированный WASM в нативный код, то это был бы уже другой формат файла (ELF/PE/Macho).
-            // Поэтому для "чистого" WASM, который обрабатывает Il2CppDumper, возвращаем Unknown.
-            return ArchitectureType.Unknown;
-        }
-    }
-}
-// Удаляем ошибочно добавленный partial class отсюда.
-// Правильная реализация GetArchitectureType находится в WebAssemblyMemory.cs

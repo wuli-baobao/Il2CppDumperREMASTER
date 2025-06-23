@@ -2,7 +2,8 @@
 
 namespace Il2CppDumper
 {
-    public sealed partial class WebAssemblyMemory : Il2Cpp
+    // Пиздец
+    public partial class WebAssemblyMemory : Il2Cpp
     {
         private readonly uint bssStart;
 

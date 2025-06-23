@@ -406,17 +406,19 @@ namespace Il2CppDumper
                                                 var op = x86Details.Operands[0];
                                                 if (op.Type == X86OperandType.Immediate)
                                                 {
-                                                    targetVa = (ulong)op.Value.Immediate;
+                                                    targetVa = (ulong)op.Immediate; 
                                                     callTypeInfo = " (direct imm)";
                                                 }
                                                 else if (op.Type == X86OperandType.Memory)
                                                 {
-                                                    if (op.Value.Memory.Base == X86Register.Invalid && // Используем Invalid
-                                                        op.Value.Memory.Index == X86Register.Invalid &&
-                                                        op.Value.Memory.Displacement != 0)
+                                                    if (op.Memory.Base == null &&  
+                                                        op.Memory.Index == null &&
+                                                        op.Memory.Displacement != 0)
                                                     {
-                                                        callTypeInfo = $" (indirect via mem 0x{op.Value.Memory.Displacement:X})";
-                                                    } else {
+                                                        callTypeInfo = $" (indirect via mem 0x{op.Memory.Displacement:X})";
+                                                    }
+                                                    else
+                                                    {
                                                         callTypeInfo = " (indirect mem)";
                                                     }
                                                 }
@@ -430,7 +432,7 @@ namespace Il2CppDumper
                                                 var op = armDetails.Operands[0];
                                                 if (op.Type == ArmOperandType.Immediate)
                                                 {
-                                                    targetVa = (ulong)op.Value.Immediate;
+                                                    targetVa = (ulong)op.ShiftValue;
                                                     callTypeInfo = " (branch)";
                                                 }
                                             }
@@ -443,7 +445,7 @@ namespace Il2CppDumper
                                                 var op = arm64Details.Operands[0];
                                                 if (op.Type == Arm64OperandType.Immediate)
                                                 {
-                                                    targetVa = (ulong)op.Value.Immediate;
+                                                    targetVa = (ulong)op.ShiftValue;
                                                     callTypeInfo = " (branch)";
                                                 }
                                             }
