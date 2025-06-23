@@ -9,6 +9,7 @@ namespace Il2CppDumper
 {
     public sealed class Macho : Il2Cpp
     {
+        private uint cputype_val; // Поле для хранения cputype
         private static readonly byte[] FeatureBytes1 = { 0x0, 0x22 };//MOVS R2, #0
         private static readonly byte[] FeatureBytes2 = { 0x78, 0x44, 0x79, 0x44 };//ADD R0, PC and ADD R1, PC
         private readonly List<MachoSection> sections = new();
@@ -17,7 +18,9 @@ namespace Il2CppDumper
         public Macho(Stream stream) : base(stream)
         {
             Is32Bit = true;
-            Position += 16; //skip magic, cputype, cpusubtype, filetype
+            // magic = ReadUInt32(); // Пропускаем magic, т.к. он проверяется до вызова этого конструктора (например, в MachoFat или Program.cs)
+            this.cputype_val = ReadUInt32();
+            Position += 8; // skip cpusubtype (4 байта) and filetype (4 байта)
             var ncmds = ReadUInt32();
             Position += 8; //skip sizeofcmds, flags
             for (var i = 0; i < ncmds; i++)
@@ -205,5 +208,25 @@ namespace Il2CppDumper
         }
 
         public override bool CheckDump() => false;
+
+        public override ArchitectureType GetArchitectureType()
+        {
+            switch (this.cputype_val)
+            {
+                case Il2CppConstants.CPU_TYPE_X86:
+                    return ArchitectureType.X86_32;
+                // CPU_TYPE_X86_64 не должен встречаться в Macho (32-битном) классе, но для полноты
+                case Il2CppConstants.CPU_TYPE_X86_64:
+                    return ArchitectureType.X86_64;
+                case Il2CppConstants.CPU_TYPE_ARM:
+                    return ArchitectureType.ARM32;
+                // CPU_TYPE_ARM64 не должен встречаться в Macho (32-битном) классе
+                case Il2CppConstants.CPU_TYPE_ARM64:
+                    return ArchitectureType.ARM64;
+                default:
+                    Console.WriteLine($"[Warning Macho.GetArchitectureType] Unknown CPU type: {this.cputype_val}. Returning Unknown.");
+                    return ArchitectureType.Unknown;
+            }
+        }
     }
 }

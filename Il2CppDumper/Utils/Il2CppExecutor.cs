@@ -474,5 +474,103 @@ namespace Il2CppDumper
             }
             return type;
         }
+
+        private List<ulong> sortedFunctionRVAs = null; // Поле для кэширования
+
+        public List<ulong> GetSortedFunctionRVAs()
+        {
+            if (this.sortedFunctionRVAs == null) // Используем this. для поля класса
+            {
+                List<ulong> pointers = new List<ulong>();
+                if (this.il2Cpp.Version >= 24.2)
+                {
+                    if (this.il2Cpp.codeGenModuleMethodPointers != null)
+                    {
+                        foreach (var pair in this.il2Cpp.codeGenModuleMethodPointers)
+                        {
+                            if (pair.Value != null)
+                                pointers.AddRange(pair.Value.Where(p => p != 0));
+                        }
+                    }
+                }
+                else
+                {
+                    if (this.il2Cpp.methodPointers != null)
+                        pointers.AddRange(this.il2Cpp.methodPointers.Where(p => p != 0));
+                }
+
+                if (this.il2Cpp.genericMethodPointers != null)
+                    pointers.AddRange(this.il2Cpp.genericMethodPointers.Where(p => p != 0));
+
+                if (this.il2Cpp.invokerPointers != null)
+                    pointers.AddRange(this.il2Cpp.invokerPointers.Where(p => p != 0));
+
+                // customAttributeGenerators уже есть в Il2CppExecutor
+                if (this.customAttributeGenerators != null) // Используем поле Il2CppExecutor
+                    pointers.AddRange(this.customAttributeGenerators.Where(p => p != 0));
+
+                if (this.il2Cpp.Version >= 22)
+                {
+                    if (this.il2Cpp.reversePInvokeWrappers != null)
+                        pointers.AddRange(this.il2Cpp.reversePInvokeWrappers.Where(p => p != 0));
+                    if (this.il2Cpp.unresolvedVirtualCallPointers != null)
+                        pointers.AddRange(this.il2Cpp.unresolvedVirtualCallPointers.Where(p => p != 0));
+                }
+                // TODO: Возможно, есть и другие источники указателей на функции.
+
+                // Преобразуем указатели в RVA, удаляем дубликаты и сортируем
+                // Убедимся, что il2Cpp не null перед вызовом GetRVA
+                if (this.il2Cpp != null)
+                {
+                    this.sortedFunctionRVAs = pointers.Select(p => this.il2Cpp.GetRVA(p))
+                                                      .Where(rva => rva != 0) // Удаляем нулевые RVA сразу
+                                                      .Distinct()
+                                                      .OrderBy(rva => rva)
+                                                      .ToList();
+                }
+                else
+                {
+                    this.sortedFunctionRVAs = new List<ulong>(); // Возвращаем пустой список, если il2Cpp null
+                }
+            }
+            return this.sortedFunctionRVAs;
+        }
+
+        public static bool TryGetMethodSize(ulong methodRVA, List<ulong> sortedFunctionRVAs, out uint size)
+        {
+            size = 0;
+            if (methodRVA == 0 || sortedFunctionRVAs == null || sortedFunctionRVAs.Count == 0) return false;
+
+            int currentIndex = sortedFunctionRVAs.BinarySearch(methodRVA);
+            if (currentIndex < 0)
+            {
+                // Адрес метода не найден в списке известных функций.
+                return false;
+            }
+
+            if (currentIndex < sortedFunctionRVAs.Count - 1)
+            {
+                // Есть следующий метод в списке
+                ulong nextMethodRVA = sortedFunctionRVAs[currentIndex + 1];
+                if (nextMethodRVA > methodRVA)
+                {
+                    size = (uint)(nextMethodRVA - methodRVA);
+                    return true;
+                }
+                else
+                {
+                    // Следующий RVA не больше текущего, это аномалия для отсортированного уникального списка.
+                    // Считаем размер неопределенным.
+                    return false;
+                }
+            }
+            else
+            {
+                // Это последний метод в списке. Размер точно определить сложно по этому методу.
+                // TODO: Позже можно улучшить, пытаясь определить конец секции кода.
+                // Пока возвращаем false, что означает, что размер нужно определять иначе или использовать эвристику.
+                return false;
+            }
+        }
     }
 }

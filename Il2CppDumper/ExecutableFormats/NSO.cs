@@ -332,5 +332,11 @@ namespace Il2CppDumper
         }
 
         public override bool CheckDump() => false;
+
+        public override ArchitectureType GetArchitectureType()
+        {
+            // NSO файлы для Nintendo Switch обычно являются ARM64
+            return ArchitectureType.ARM64;
+        }
     }
 }
