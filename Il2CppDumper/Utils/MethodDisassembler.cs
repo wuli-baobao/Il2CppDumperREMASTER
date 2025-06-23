@@ -20,7 +20,6 @@ namespace Il2CppDumper
         // Мы можем хранить базовый CapstoneInstruction, а при анализе приводить к нужному типу.
         public CapstoneInstruction PlatformSpecificInstruction { get; set; }
 
-
         public override string ToString()
         {
             return $"0x{Address:X}: {Mnemonic} {Operands}";
@@ -36,13 +35,12 @@ namespace Il2CppDumper
 
             AbstractDisassembler disassembler = null;
             CapstoneInstruction[] capstoneInstructions = null;
-
             try
             {
                 switch (architecture)
                 {
                     case ArchitectureType.X86_64:
-                        var x64Disassembler = CapstoneX86Disassembler.CreateX86Disassembler(X86DisassembleMode.Bit64);
+var x64Disassembler = CapstoneX86Disassembler.CreateX86Disassembler(X86DisassembleMode.Bit64);
                         x64Disassembler.EnableInstructionDetails = true;
                         capstoneInstructions = x64Disassembler.Disassemble(codeBytes, (long)baseAddress);
                         disassembler = x64Disassembler;
@@ -90,7 +88,7 @@ namespace Il2CppDumper
             }
             catch (DllNotFoundException dllEx)
             {
-                Console.WriteLine($"[MethodDisassembler] Gee.External.Capstone: Native library (capstone.dll/libcapstone.so/libcapstone.dylib) not found. Error: {dllEx.Message}");
+Console.WriteLine($"[MethodDisassembler] Gee.External.Capstone: Native library (capstone.dll/libcapstone.so/libcapstone.dylib) not found. Error: {dllEx.Message}");
             }
             catch (CapstoneException capEx)
             {
