@@ -13,10 +13,12 @@ namespace Il2CppDumper.lifting
         private readonly Dictionary<string, TypeReference> _typeCache = new();
         private readonly Dictionary<ulong, string> _labelMap = new();
         private int _labelCounter;
+        private readonly int _pointerSize;
 
-        public Lifter(ModuleDefinition module)
+        public Lifter(ModuleDefinition module, int pointerSize)
         {
             _module = module;
+            _pointerSize = pointerSize;
         }
 
         public List<IROperation> Lift(IEnumerable<DisassembledInstruction> instructions)
@@ -45,10 +47,21 @@ namespace Il2CppDumper.lifting
 
                 if (instr.PlatformSpecificInstruction is X86Instruction x86Instr)
                 {
-                    var lifted = LiftX86Instruction(x86Instr);
-                    if (lifted != null)
+                    try
                     {
-                        result.AddRange(lifted);
+                        var lifted = LiftX86Instruction(x86Instr);
+                        if (lifted != null)
+                        {
+                            result.AddRange(lifted);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        result.Add(new ErrorOperation 
+                        { 
+                            Address = (ulong)instr.Address,
+                            Message = $"Lifting failed: {ex.Message}" 
+                        });
                     }
                 }
             }
@@ -60,7 +73,7 @@ namespace Il2CppDumper.lifting
         {
             if (!IsControlFlowInstruction(instr)) return;
 
-            var detail = instr.Details;  // Fixed: use Details instead of Detail
+            var detail = instr.Details;
             if (detail is X86InstructionDetail x86Detail)
             {
                 foreach (var operand in x86Detail.Operands)
@@ -80,7 +93,7 @@ namespace Il2CppDumper.lifting
         private List<IROperation> LiftX86Instruction(X86Instruction instr)
         {
             var operations = new List<IROperation>();
-            var detail = instr.Details as X86InstructionDetail;  // Fixed: use Details
+            var detail = instr.Details as X86InstructionDetail;
 
             if (detail == null) return operations;
 
@@ -210,32 +223,51 @@ namespace Il2CppDumper.lifting
                 Left = ConvertOperand(left),
                 Right = ConvertOperand(right),
                 OperationType = CompareOperationType.Equal,
-                Destination = new RegisterOperand { Name = "eflags", Type = _module.TypeSystem.UInt32 }
+                Destination = new RegisterOperand { Name = "eflags", Type = _module.ImportReference(typeof(uint)) }
             };
         }
 
         private CallOperation CreateCall(X86Instruction instr, X86InstructionDetail detail)
         {
-            var callOp = new CallOperation
+            try
             {
-                Address = (ulong)instr.Address,
-                IsVirtual = false
-            };
+                var voidType = _module.ImportReference(typeof(void));
+                var objectType = _module.ImportReference(typeof(object));
+                var unresolvedMethod = new MethodReference("Unresolved", voidType)
+                {
+                    DeclaringType = new TypeReference("System", "Object", _module, objectType.Scope)
+                };
 
-            if (detail.Operands.Length > 0)
-            {
-                var targetOp = detail.Operands[0];
-                if (targetOp.Type == X86OperandType.Immediate)
+                var callOp = new CallOperation
                 {
-                    callOp.TargetAddress = (uint?)targetOp.Immediate;
-                }
-                else
+                    Address = (ulong)instr.Address,
+                    IsVirtual = false,
+                    Signature = unresolvedMethod
+                };
+
+                if (detail.Operands.Length > 0)
                 {
-                    callOp.Target = ConvertOperand(targetOp);
+                    var targetOp = detail.Operands[0];
+                    if (targetOp.Type == X86OperandType.Immediate)
+                    {
+                        callOp.TargetAddress = (uint?)targetOp.Immediate;
+                    }
+                    else
+                    {
+                        callOp.Target = ConvertOperand(targetOp);
+                    }
                 }
+
+                return callOp;
             }
-
-            return callOp;
+            catch (Exception ex)
+            {
+                return new CallOperation
+                {
+                    Address = (ulong)instr.Address,
+                    Signature = new MethodReference("Error", _module.TypeSystem.Void)
+                };
+            }
         }
 
         private JumpOperation CreateJump(X86Instruction instr, X86InstructionDetail detail)
@@ -269,7 +301,7 @@ namespace Il2CppDumper.lifting
                 targetAddr = (ulong)targetOp.Immediate;
             }
 
-            var condition = new RegisterOperand { Name = "eflags", Type = _module.TypeSystem.UInt32 };
+            var condition = new RegisterOperand { Name = "eflags", Type = _module.ImportReference(typeof(uint)) };
 
             var conditionCode = instr.Mnemonic.ToUpper() switch
             {
@@ -372,32 +404,21 @@ namespace Il2CppDumper.lifting
 
             if (addressOnly)
             {
-                memOperand.Type = _module.TypeSystem.IntPtr;
+                memOperand.Type = _module.ImportReference(typeof(IntPtr));
             }
 
             return memOperand;
-        }
-
-        private TypeReference GetTypeReference(Type type)
-        {
-            var key = type.FullName;
-            if (!_typeCache.TryGetValue(key, out var typeRef))
-            {
-                typeRef = _module.ImportReference(type);
-                _typeCache[key] = typeRef;
-            }
-            return typeRef;
         }
 
         private TypeReference GetTypeReference(int sizeInBytes)
         {
             return sizeInBytes switch
             {
-                1 => _module.TypeSystem.Byte,
-                2 => _module.TypeSystem.UInt16,
-                4 => _module.TypeSystem.UInt32,
-                8 => _module.TypeSystem.UInt64,
-                _ => _module.TypeSystem.IntPtr
+                1 => _module.ImportReference(typeof(byte)),
+                2 => _module.ImportReference(typeof(ushort)),
+                4 => _module.ImportReference(typeof(uint)),
+                8 => _module.ImportReference(typeof(ulong)),
+                _ => _module.ImportReference(typeof(IntPtr))
             };
         }
 
@@ -409,7 +430,7 @@ namespace Il2CppDumper.lifting
                 "ax" or "bx" or "cx" or "dx" or "si" or "di" or "bp" or "sp" => 2,
                 "eax" or "ebx" or "ecx" or "edx" or "esi" or "edi" or "ebp" or "esp" => 4,
                 "rax" or "rbx" or "rcx" or "rdx" or "rsi" or "rdi" or "rbp" or "rsp" => 8,
-                _ => IntPtr.Size
+                _ => _pointerSize
             };
         }
 

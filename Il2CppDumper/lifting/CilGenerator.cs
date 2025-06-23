@@ -1,8 +1,10 @@
 ﻿using Il2CppDumper.lifting.Operation;
+using Il2CppDumper.UppdateLowCode;
 using Mono.Cecil;
 using Mono.Cecil.Cil;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace Il2CppDumper.lifting
 {
@@ -10,18 +12,84 @@ namespace Il2CppDumper.lifting
     {
         private readonly ILProcessor ilProcessor;
         private readonly MethodDefinition method;
+        private readonly DummyAssemblyGenerator generator;
+        private readonly ModuleDefinition module;
         private readonly Dictionary<string, VariableDefinition> registers = new();
         private readonly Dictionary<string, Instruction> labels = new();
+        private readonly Dictionary<ulong, Instruction> addressToInstruction = new();
+        private Instruction lastGeneratedInstruction;
 
-        public CilGenerator(ILProcessor ilProcessor, MethodDefinition method)
+        public CilGenerator(ILProcessor ilProcessor, MethodDefinition method, DummyAssemblyGenerator generator)
         {
             this.ilProcessor = ilProcessor;
             this.method = method;
+            this.generator = generator;
+            this.module = method.Module;
         }
 
         public void Generate(List<IROperation> operations)
         {
             // Создаем метки
+            CreateLabels(operations);
+
+            // Оптимизация и анализ типов ВНУТРИ генератора
+            var optimizedOperations = OptimizeIR(operations);
+
+            // Генерируем код
+            foreach (var op in optimizedOperations)
+            {
+                try
+                {
+                    GenerateOperation(op);
+                }
+                catch (Exception ex)
+                {
+                    // Логируем ошибку и добавляем исключение в код
+                    ilProcessor.Emit(OpCodes.Ldstr, $"Operation error: {ex.Message}");
+                    ilProcessor.Emit(OpCodes.Newobj, SafeImportConstructor(
+                        typeof(Exception),
+                        new[] { typeof(string) }));
+                    ilProcessor.Emit(OpCodes.Throw);
+                }
+            }
+
+            // Добавляем возврат если отсутствует
+            AddReturnIfMissing();
+
+            // Применяем метки
+            ApplyLabels();
+        }
+
+        private List<IROperation> OptimizeIR(List<IROperation> operations)
+        {
+            try
+            {
+                // Data flow analysis (теперь в правильном контексте)
+                var dfAnalyzer = new DataFlowAnalyzer(module);
+                var typeMap = dfAnalyzer.AnalyzeTypes(operations);
+
+                // Apply types to registers
+                foreach (var op in operations.OfType<RegisterOperand>())
+                {
+                    if (typeMap.TryGetValue(op.Name, out var type))
+                    {
+                        op.Type = type;
+                    }
+                }
+
+                // Optimize IR
+                var optimizer = new IROptimizer();
+                return optimizer.Optimize(operations, typeMap);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[CilGenerator] IR optimization failed: {ex}");
+                return operations; // Возвращаем оригинал при ошибке
+            }
+        }
+
+        private void CreateLabels(List<IROperation> operations)
+        {
             foreach (var op in operations)
             {
                 if (op is JumpOperation jump)
@@ -33,48 +101,48 @@ namespace Il2CppDumper.lifting
                     labels[condJump.TargetLabel] = Instruction.Create(OpCodes.Nop);
                 }
             }
+        }
 
-            // Генерируем код
-            foreach (var op in operations)
+        private void GenerateOperation(IROperation op)
+        {
+            switch (op)
             {
-                switch (op)
-                {
-                    case AssignOperation assign:
-                        GenerateAssign(assign);
-                        break;
-                    case BinaryOperation binary:
-                        GenerateBinary(binary);
-                        break;
-                    case CallOperation call:
-                        GenerateCall(call);
-                        break;
-                    case CompareOperation cmp:
-                        GenerateCompare(cmp);
-                        break;
-                    case JumpOperation jump:
-                        GenerateJump(jump);
-                        break;
-                    case ConditionalJumpOperation condJump:
-                        GenerateConditionalJump(condJump);
-                        break;
-                    case PushOperation push:
-                        GeneratePush(push);
-                        break;
-                    case PopOperation pop:
-                        GeneratePop(pop);
-                        break;
-                    case ReturnOperation ret:
-                        GenerateReturn(ret);
-                        break;
-                }
+                case AssignOperation assign: GenerateAssign(assign); break;
+                case BinaryOperation binary: GenerateBinary(binary); break;
+                case CallOperation call: GenerateCall(call); break;
+                case CompareOperation cmp: GenerateCompare(cmp); break;
+                case JumpOperation jump: GenerateJump(jump); break;
+                case ConditionalJumpOperation condJump: GenerateConditionalJump(condJump); break;
+                case PushOperation push: GeneratePush(push); break;
+                case PopOperation pop: GeneratePop(pop); break;
+                case ReturnOperation ret: GenerateReturn(ret); break;
+                case ErrorOperation error: GenerateError(error); break;
             }
+        }
 
-            // Добавляем возврат если отсутствует
-            if (ilProcessor.Body.Instructions.Count == 0 ||
-                ilProcessor.Body.Instructions[^1].OpCode != OpCodes.Ret)
+        private void RecordInstructionAddress(IROperation op, Instruction startInstruction)
+        {
+            var firstNewInstruction = startInstruction != null
+                ? startInstruction.Next ?? ilProcessor.Body.Instructions.First()
+                : ilProcessor.Body.Instructions.FirstOrDefault();
+
+            if (firstNewInstruction != null)
             {
-                ilProcessor.Emit(OpCodes.Ret);
+                ulong address = (ulong)op.Address;
+                addressToInstruction[address] = firstNewInstruction;
             }
+        }
+
+        public Instruction GetInstruction(ulong address)
+        {
+            return addressToInstruction.TryGetValue(address, out var instr)
+                ? instr
+                : null;
+        }
+
+        public void AddExceptionHandler(ExceptionHandler handler)
+        {
+            ilProcessor.Body.ExceptionHandlers.Add(handler);
         }
 
         private void GenerateAssign(AssignOperation assign)
@@ -115,6 +183,8 @@ namespace Il2CppDumper.lifting
 
         private void GenerateCall(CallOperation call)
         {
+            ilProcessor.Append(CreateComment($"Call operation at 0x{call.Address:X}"));
+
             foreach (var arg in call.Arguments)
             {
                 LoadOperand(arg);
@@ -123,16 +193,38 @@ namespace Il2CppDumper.lifting
             if (call.TargetAddress.HasValue)
             {
                 var methodRef = ResolveMethod(call.TargetAddress.Value);
-                ilProcessor.Emit(call.IsVirtual ? OpCodes.Callvirt : OpCodes.Call, methodRef);
+                if (methodRef != null)
+                {
+                    ilProcessor.Append(CreateComment($"Call to {methodRef.FullName}"));
+                    ilProcessor.Emit(call.IsVirtual ? OpCodes.Callvirt : OpCodes.Call, methodRef);
+                }
+                else
+                {
+                    ilProcessor.Append(CreateComment($"Unresolved call to 0x{call.TargetAddress.Value:X}"));
+                    ilProcessor.Emit(OpCodes.Call, SafeImportMethod(new MethodReference(
+                        $"Unresolved_0x{call.TargetAddress.Value:X}",
+                        module.TypeSystem.Void)));
+                }
             }
             else if (call.Target != null)
             {
+                ilProcessor.Append(CreateComment("Indirect call"));
                 LoadOperand(call.Target);
-                ilProcessor.Emit(OpCodes.Callvirt, method.Module.ImportReference(call.Method));
+                ilProcessor.Emit(OpCodes.Callvirt, SafeImportMethod(call.Method));
+            }
+            else if (call.Method != null)
+            {
+                ilProcessor.Append(CreateComment($"Call to {call.Method.FullName}"));
+                ilProcessor.Emit(OpCodes.Call, SafeImportMethod(call.Method));
             }
             else
             {
-                ilProcessor.Emit(OpCodes.Call, method.Module.ImportReference(call.Method));
+                ilProcessor.Append(CreateComment("Invalid call operation"));
+                ilProcessor.Emit(OpCodes.Ldstr, "Invalid call operation");
+                ilProcessor.Emit(OpCodes.Newobj, SafeImportConstructor(
+                    typeof(NotImplementedException),
+                    new[] { typeof(string) }));
+                ilProcessor.Emit(OpCodes.Throw);
             }
 
             if (call.Destination != null)
@@ -141,10 +233,34 @@ namespace Il2CppDumper.lifting
             }
         }
 
-        private MethodReference ResolveMethod(uint rva)
+        private MethodReference SafeImportMethod(MethodReference methodRef)
         {
-            return method.Module.LookupToken((int)rva) as MethodReference
-                ?? throw new InvalidOperationException($"Method at RVA 0x{rva:X} not found");
+            if (methodRef == null) return null;
+
+            try
+            {
+                return module.ImportReference(methodRef);
+            }
+            catch
+            {
+                return new MethodReference(
+                    $"ImportError_{methodRef.Name}",
+                    module.TypeSystem.Void,
+                    module.TypeSystem.Object);
+            }
+        }
+
+        private MethodReference SafeImportConstructor(Type type, Type[] parameters)
+        {
+            try
+            {
+                var constructor = type.GetConstructor(parameters);
+                return module.ImportReference(constructor);
+            }
+            catch
+            {
+                return module.ImportReference(typeof(Exception).GetConstructor(new[] { typeof(string) }));
+            }
         }
 
         private void GenerateCompare(CompareOperation cmp)
@@ -169,22 +285,69 @@ namespace Il2CppDumper.lifting
 
         private void GenerateJump(JumpOperation jump)
         {
-            ilProcessor.Emit(OpCodes.Br, labels[jump.TargetLabel]);
+            if (labels.TryGetValue(jump.TargetLabel, out var targetLabel))
+            {
+                ilProcessor.Emit(OpCodes.Br, targetLabel);
+            }
+            else
+            {
+                ilProcessor.Emit(OpCodes.Ldstr, $"Missing label: {jump.TargetLabel}");
+                ilProcessor.Emit(OpCodes.Throw);
+            }
         }
 
         private void GenerateConditionalJump(ConditionalJumpOperation condJump)
         {
             LoadOperand(condJump.Condition);
 
+            if (!labels.TryGetValue(condJump.TargetLabel, out var targetLabel))
+            {
+                ilProcessor.Emit(OpCodes.Ldstr, $"Missing label: {condJump.TargetLabel}");
+                ilProcessor.Emit(OpCodes.Throw);
+                return;
+            }
+
             switch (condJump.Code)
             {
                 case ConditionCode.Equal:
-                    ilProcessor.Emit(OpCodes.Brtrue, labels[condJump.TargetLabel]);
+                    ilProcessor.Emit(OpCodes.Brtrue, targetLabel);
                     break;
                 case ConditionCode.NotEqual:
-                    ilProcessor.Emit(OpCodes.Brfalse, labels[condJump.TargetLabel]);
+                    ilProcessor.Emit(OpCodes.Brfalse, targetLabel);
                     break;
-                    // Добавьте другие условия по аналогии
+                case ConditionCode.Greater:
+                    ilProcessor.Emit(OpCodes.Bgt, targetLabel);
+                    break;
+                case ConditionCode.GreaterOrEqual:
+                    ilProcessor.Emit(OpCodes.Bge, targetLabel);
+                    break;
+                case ConditionCode.Less:
+                    ilProcessor.Emit(OpCodes.Blt, targetLabel);
+                    break;
+                case ConditionCode.LessOrEqual:
+                    ilProcessor.Emit(OpCodes.Ble, targetLabel);
+                    break;
+                case ConditionCode.Above:
+                    ilProcessor.Emit(OpCodes.Bgt_Un, targetLabel);
+                    break;
+                case ConditionCode.Below:
+                    ilProcessor.Emit(OpCodes.Blt_Un, targetLabel);
+                    break;
+                case ConditionCode.Overflow:
+                    ilProcessor.Emit(OpCodes.Box, method.Module.TypeSystem.Int32);
+                    ilProcessor.Emit(OpCodes.Ldc_I4, 0x800);
+                    ilProcessor.Emit(OpCodes.And);
+                    ilProcessor.Emit(OpCodes.Brtrue, targetLabel);
+                    break;
+                case ConditionCode.NoOverflow:
+                    ilProcessor.Emit(OpCodes.Box, method.Module.TypeSystem.Int32);
+                    ilProcessor.Emit(OpCodes.Ldc_I4, 0x800);
+                    ilProcessor.Emit(OpCodes.And);
+                    ilProcessor.Emit(OpCodes.Brfalse, targetLabel);
+                    break;
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(condJump.Code),
+                        $"Unsupported condition code: {condJump.Code}");
             }
         }
 
@@ -207,6 +370,31 @@ namespace Il2CppDumper.lifting
                 LoadOperand(ret.Value);
             }
             ilProcessor.Emit(OpCodes.Ret);
+        }
+
+        private void GenerateError(ErrorOperation error)
+        {
+            ilProcessor.Append(CreateComment($"IR Error: {error.Message}"));
+            ilProcessor.Emit(OpCodes.Ldstr, $"IR Error: {error.Message}");
+            ilProcessor.Emit(OpCodes.Newobj, SafeImportConstructor(
+                typeof(Exception),
+                new[] { typeof(string) }));
+            ilProcessor.Emit(OpCodes.Throw);
+        }
+
+        private Instruction CreateComment(string text)
+        {
+            // В реальной реализации здесь можно добавить sequence point
+            var comment = Instruction.Create(OpCodes.Nop);
+            return comment;
+        }
+
+        private void ApplyLabels()
+        {
+            foreach (var label in labels)
+            {
+                ilProcessor.Body.Instructions.Insert(0, label.Value);
+            }
         }
 
         private void LoadOperand(IROperand operand)
@@ -253,7 +441,7 @@ namespace Il2CppDumper.lifting
             {
                 ilProcessor.Emit(OpCodes.Ldc_I4, mem.Displacement);
             }
-            ilProcessor.Emit(OpCodes.Ldobj, method.Module.ImportReference(mem.Type));
+            ilProcessor.Emit(OpCodes.Ldobj, SafeImportType(mem.Type));
         }
 
         private void GenerateMemoryStore(MemoryOperand mem)
@@ -271,7 +459,21 @@ namespace Il2CppDumper.lifting
             {
                 ilProcessor.Emit(OpCodes.Ldc_I4, mem.Displacement);
             }
-            ilProcessor.Emit(OpCodes.Stobj, method.Module.ImportReference(mem.Type));
+            ilProcessor.Emit(OpCodes.Stobj, SafeImportType(mem.Type));
+        }
+
+        private TypeReference SafeImportType(TypeReference typeRef)
+        {
+            if (typeRef == null) return module.TypeSystem.Object;
+
+            try
+            {
+                return module.ImportReference(typeRef);
+            }
+            catch
+            {
+                return module.TypeSystem.Object;
+            }
         }
 
         private void EmitConstant(object value)
@@ -285,18 +487,57 @@ namespace Il2CppDumper.lifting
                 case bool b: ilProcessor.Emit(b ? OpCodes.Ldc_I4_1 : OpCodes.Ldc_I4_0); break;
                 case string s: ilProcessor.Emit(OpCodes.Ldstr, s); break;
                 case null: ilProcessor.Emit(OpCodes.Ldnull); break;
+                default:
+                    ilProcessor.Emit(OpCodes.Ldstr, value.ToString());
+                    break;
             }
+        }
+
+        private MethodReference ResolveMethod(ulong va)
+        {
+            try
+            {
+                var methodDef = generator.ResolveMethodByVA(va);
+                return methodDef != null
+                    ? module.ImportReference(methodDef)
+                    : CreateStubMethod(va);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[ResolveMethod] Error resolving method at VA 0x{va:X}: {ex}");
+                return CreateStubMethod(va);
+            }
+        }
+
+        private MethodReference CreateStubMethod(ulong va)
+        {
+            return new MethodReference(
+                $"Unresolved_0x{va:X}",
+                module.TypeSystem.Void,
+                module.ImportReference(typeof(object)))
+            {
+                HasThis = false
+            };
         }
 
         private VariableDefinition GetRegister(string name, TypeReference type)
         {
             if (!registers.TryGetValue(name, out var variable))
             {
-                variable = new VariableDefinition(method.Module.ImportReference(type));
+                variable = new VariableDefinition(SafeImportType(type));
                 method.Body.Variables.Add(variable);
                 registers[name] = variable;
             }
             return variable;
+        }
+
+        private void AddReturnIfMissing()
+        {
+            if (ilProcessor.Body.Instructions.Count == 0 ||
+                ilProcessor.Body.Instructions[^1].OpCode != OpCodes.Ret)
+            {
+                ilProcessor.Emit(OpCodes.Ret);
+            }
         }
     }
 }

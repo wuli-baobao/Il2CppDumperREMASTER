@@ -3,6 +3,7 @@ using Gee.External.Capstone.Arm64;
 using Gee.External.Capstone.X86;
 using Il2CppDumper.lifting;
 using Il2CppDumper.lifting.Operation;
+using Il2CppDumper.UppdateLowCode;
 using Mono.Cecil;
 using Mono.Cecil.Cil;
 using Mono.Cecil.Rocks;
@@ -743,55 +744,71 @@ namespace Il2CppDumper
             try
             {
                 var ilprocessor = methodDefinition.Body.GetILProcessor();
-                ilprocessor.Body.Instructions.Clear(); // Очищаем существующие инструкции (если есть)
+                ilprocessor.Body.Instructions.Clear();
                 ilprocessor.Body.Variables.Clear();
                 ilprocessor.Body.ExceptionHandlers.Clear();
 
-                Console.WriteLine($"[GenerateMethodBody] Starting for method: {methodDefinition.FullName}");
+                int pointerSize = (architecture == ArchitectureType.X86_64 || architecture == ArchitectureType.ARM64) ? 8 : 4;
 
-                // 1. Дизассемблирование
-                Console.WriteLine($"[GenerateMethodBody] Disassembling {codeBytes.Length} bytes for method {methodDefinition.FullName} at VA 0x{methodPointer:X}");
-                var disassembledInstructions = MethodDisassembler.Disassemble(codeBytes, methodPointer, architecture);
+                // Дизассемблирование
+                var disassembledInstructions = MethodDisassembler.Disassemble(
+                    codeBytes,
+                    methodPointer,
+                    architecture
+                );
 
                 if (disassembledInstructions == null || !disassembledInstructions.Any())
                 {
-                    Console.WriteLine($"[GenerateMethodBody] Disassembly failed or no instructions for {methodDefinition.FullName}");
-                    ilprocessor.Emit(OpCodes.Ldstr, "Failed to disassemble method");
-                    ilprocessor.Emit(OpCodes.Newobj, methodDefinition.Module.ImportReference(
-                        typeof(NotImplementedException).GetConstructor(new[] { typeof(string) })));
-                    ilprocessor.Emit(OpCodes.Throw);
+                    GenerateFallbackBody(methodDefinition, "Disassembly failed or no instructions");
                     return;
                 }
 
-                Console.WriteLine($"[GenerateMethodBody] Disassembled {disassembledInstructions.Count} instructions for {methodDefinition.FullName}");
+                // Лифтинг в промежуточное представление
+                var lifter = new Lifter(methodDefinition.Module, pointerSize);
+                List<IROperation> liftedOperations;
 
-                // 2. Лифтинг в промежуточное представление
-                Console.WriteLine($"[GenerateMethodBody] Lifting IR for {methodDefinition.FullName}");
-                var lifter = new Lifter(methodDefinition.Module);
-                var liftedOperations = lifter.Lift(disassembledInstructions);
+                try
+                {
+                    liftedOperations = lifter.Lift(disassembledInstructions);
+                }
+                catch (Exception liftEx)
+                {
+                    Console.WriteLine($"[GenerateMethodBody] Lifting failed: {liftEx}");
+                    liftedOperations = new List<IROperation>
+            {
+                new ErrorOperation
+                {
+                    Address = methodPointer,
+                    Message = $"Lifting failed: {liftEx.Message}"
+                }
+            };
+                }
 
-                Console.WriteLine($"[GenerateMethodBody] Lifted to {liftedOperations.Count} IR operations for {methodDefinition.FullName}");
+                // Убрали анализ типов и оптимизацию - они будут выполняться позже
+                // в контексте CilGenerator, где все данные готовы
 
-                // 3. Генерация CIL из промежуточного представления
-                Console.WriteLine($"[GenerateMethodBody] Generating CIL for {methodDefinition.FullName}");
-                var cilGenerator = new CilGenerator(ilprocessor, methodDefinition);
+                // Control flow analysis (только структурирование)
+                var cfAnalyzer = new ControlFlowAnalyzer();
+                var blocks = cfAnalyzer.StructureBlocks(liftedOperations);
+
+                // Generate structured CIL
+                var cilGenerator = new CilGenerator(ilprocessor, methodDefinition, this);
+
+                // Передаем лифтированные операции напрямую
                 cilGenerator.Generate(liftedOperations);
+
+                // Add structured exception handling
+                ReconstructExceptionHandling(blocks, cilGenerator, methodDefinition);
 
                 Console.WriteLine($"[GenerateMethodBody] Successfully generated CIL for {methodDefinition.FullName}");
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"[GenerateMethodBody] Error generating method body for {methodDefinition.FullName}: {ex}");
-
-                // Fallback - генерируем заглушку
-                var ilprocessor = methodDefinition.Body.GetILProcessor();
-                ilprocessor.Body.Instructions.Clear();
-                ilprocessor.Emit(OpCodes.Ldstr, $"Error generating method: {ex.Message}");
-                ilprocessor.Emit(OpCodes.Newobj, methodDefinition.Module.ImportReference(
-                    typeof(NotImplementedException).GetConstructor(new[] { typeof(string) })));
-                ilprocessor.Emit(OpCodes.Throw);
+                GenerateFallbackBody(methodDefinition, $"Error generating method: {ex.Message}");
             }
         }
+
         private void GenerateFallbackBody(MethodDefinition methodDefinition, string errorMessage)
         {
             var ilProc = methodDefinition.Body.GetILProcessor();
@@ -800,6 +817,64 @@ namespace Il2CppDumper
             ilProc.Emit(OpCodes.Newobj, methodDefinition.Module.ImportReference(
                 typeof(NotImplementedException).GetConstructor(new[] { typeof(string) })));
             ilProc.Emit(OpCodes.Throw);
+        }
+
+        private void ReconstructExceptionHandling(List<IRBlock> blocks, CilGenerator cilGenerator, MethodDefinition methodDefinition)
+        {
+            // 1. Identify protected blocks (try blocks)
+            var tryStarts = new List<IRBlock>();
+            var tryEnds = new List<IRBlock>();
+
+            // 2. Identify handler blocks (catch/finally)
+            var handlerStarts = new List<IRBlock>();
+
+            // 3. Create ExceptionHandlers
+            foreach (var block in blocks)
+            {
+                // Pattern matching for exception handling
+                if (block.Operations.Any(op => op is CallOperation call &&
+                    call.Method?.Name == "BeginExceptionBlock"))
+                {
+                    tryStarts.Add(block);
+                }
+
+                if (block.Operations.Any(op => op is CallOperation call &&
+                    call.Method?.Name == "EndExceptionBlock"))
+                {
+                    tryEnds.Add(block);
+                }
+
+                if (block.Operations.Any(op => op is CallOperation call &&
+                    call.Method?.Name.Contains("Catch") == true))
+                {
+                    handlerStarts.Add(block);
+                }
+            }
+
+            // Create exception handling clauses
+            for (int i = 0; i < tryStarts.Count; i++)
+            {
+                if (i < tryEnds.Count && i < handlerStarts.Count)
+                {
+                    var tryStart = cilGenerator.GetInstruction(tryStarts[i].StartAddress);
+                    var tryEnd = cilGenerator.GetInstruction(tryEnds[i].StartAddress);
+                    var handlerStart = cilGenerator.GetInstruction(handlerStarts[i].StartAddress);
+
+                    if (tryStart != null && tryEnd != null && handlerStart != null)
+                    {
+                        var handler = new ExceptionHandler(ExceptionHandlerType.Catch)
+                        {
+                            TryStart = tryStart,
+                            TryEnd = tryEnd,
+                            HandlerStart = handlerStart,
+                            HandlerEnd = handlerStart.Next ?? tryEnd,
+                            CatchType = methodDefinition.Module.ImportReference(typeof(Exception))
+                        };
+
+                        cilGenerator.AddExceptionHandler(handler);
+                    }
+                }
+            }
         }
         private GenericParameter CreateGenericParameter(Il2CppGenericParameter param, IGenericParameterProvider iGenericParameterProvider)
         {
@@ -855,7 +930,14 @@ namespace Il2CppDumper
             }
             return new CustomAttributeArgument(typeReference, val);
         }
-
+        public MethodDefinition ResolveMethodByVA(ulong va)
+        {
+            if (addressToMethodMap.TryGetValue(va, out var method))
+            {
+                return method;
+            }
+            return null;
+        }
         private TypeReference GetBlobValueTypeReference(BlobValue blobValue, MemberReference memberReference)
         {
             if (blobValue.EnumType != null)
