@@ -78,3 +78,5 @@ namespace Il2CppDumper // Убедимся, что WebAssemblyMemory в прав
         }
     }
 }
+// Удаляем ошибочно добавленный partial class отсюда.
+// Правильная реализация GetArchitectureType находится в WebAssemblyMemory.cs

@@ -1,6 +1,11 @@
 ﻿using Mono.Cecil;
 using Mono.Cecil.Cil;
 using Mono.Collections.Generic;
+// Используем пространства имен из Gee.External.Capstone
+using Gee.External.Capstone;
+using Gee.External.Capstone.Arm;
+using Gee.External.Capstone.Arm64;
+using Gee.External.Capstone.X86;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -382,56 +387,62 @@ namespace Il2CppDumper
                                         retFound = true;
                                     }
 
-                                    // Анализ вызовов
+                                    // Анализ вызовов с использованием Gee.External.Capstone
                                     bool isCallInstruction = instr.Mnemonic.Equals("call", StringComparison.OrdinalIgnoreCase) ||
                                                              instr.Mnemonic.Equals("bl", StringComparison.OrdinalIgnoreCase) ||
                                                              instr.Mnemonic.Equals("blx", StringComparison.OrdinalIgnoreCase);
 
-                                    if (isCallInstruction && instr.Details != null)
+                                    if (isCallInstruction && instr.PlatformSpecificInstruction != null)
                                     {
                                         ulong targetVa = 0;
                                         string callTypeInfo = "";
 
-                                        if (architecture == ArchitectureType.X86_32 || architecture == ArchitectureType.X86_64)
+                                        if (instr.PlatformSpecificInstruction is X86Instruction x86Instr)
                                         {
-                                            var x86Details = instr.Details as Capstone.X86.X86InstructionDetails;
-                                            if (x86Details != null && x86Details.Operands.Any())
+                                            var x86Details = x86Instr.Details;
+                                            if (x86Details != null && x86Details.Operands.Length > 0)
                                             {
-                                                var op = x86Details.Operands[0]; // Обычно первый операнд для call
-                                                if (op.Type == Capstone.X86.X86OperandType.Immediate)
+                                                var op = x86Details.Operands[0];
+                                                if (op.Type == X86OperandType.Immediate)
                                                 {
-                                                    targetVa = (ulong)op.ImmediateValue; // Capstone обычно дает абсолютный адрес для call imm
-                                                    callTypeInfo = op.IsIndirect ? " (indirect imm)" : " (direct imm)";
+                                                    targetVa = (ulong)op.Value.Immediate;
+                                                    callTypeInfo = " (direct imm)";
                                                 }
-                                                else if (op.Type == Capstone.X86.X86OperandType.Memory)
+                                                else if (op.Type == X86OperandType.Memory)
                                                 {
-                                                    if (op.Memory.Base == Capstone.X86.X86Register.None &&
-                                                        op.Memory.Index == Capstone.X86.X86Register.None &&
-                                                        op.Memory.Displacement != 0)
+                                                    if (op.Value.Memory.Base == X86Register.Invalid && // Используем Invalid
+                                                        op.Value.Memory.Index == X86Register.Invalid &&
+                                                        op.Value.Memory.Displacement != 0)
                                                     {
-                                                        // call [imm_address] - адрес для чтения указателя
-                                                        callTypeInfo = $" (indirect via mem 0x{op.Memory.Displacement:X})";
-                                                        // targetVa = op.Memory.Displacement; // Это адрес указателя, а не самой функции
+                                                        callTypeInfo = $" (indirect via mem 0x{op.Value.Memory.Displacement:X})";
                                                     } else {
                                                         callTypeInfo = " (indirect mem)";
                                                     }
                                                 }
                                             }
                                         }
-                                        else if (architecture == ArchitectureType.ARM32 || architecture == ArchitectureType.ARM64)
+                                        else if (instr.PlatformSpecificInstruction is ArmInstruction armInstr)
                                         {
-                                            // Для ARM/ARM64, Capstone обычно вычисляет абсолютный адрес для BL/BLX и помещает его в операнд Immediate
-                                            var 인식된아키텍처 = architecture == ArchitectureType.ARM32 ?
-                                                instr.Details as Capstone.Arm.ArmInstructionDetails :
-                                                instr.Details as Capstone.Arm64.Arm64InstructionDetails;
-
-                                            if (인식된아키텍처 != null && 인식된아키텍처.Operands.Any())
+                                            var armDetails = armInstr.Details;
+                                            if (armDetails != null && armDetails.Operands.Length > 0)
                                             {
-                                                var op = 인식된아키텍처.Operands[0];
-                                                if (op.Type == Capstone.Arm.ArmOperandType.Immediate || // ARM32
-                                                    (architecture == ArchitectureType.ARM64 && op.Type == (Capstone.Arm.ArmOperandType)Capstone.Arm64.Arm64OperandType.Immediate))
+                                                var op = armDetails.Operands[0];
+                                                if (op.Type == ArmOperandType.Immediate)
                                                 {
-                                                    targetVa = (ulong)op.ImmediateValue;
+                                                    targetVa = (ulong)op.Value.Immediate;
+                                                    callTypeInfo = " (branch)";
+                                                }
+                                            }
+                                        }
+                                        else if (instr.PlatformSpecificInstruction is Arm64Instruction arm64Instr)
+                                        {
+                                            var arm64Details = arm64Instr.Details;
+                                            if (arm64Details != null && arm64Details.Operands.Length > 0)
+                                            {
+                                                var op = arm64Details.Operands[0];
+                                                if (op.Type == Arm64OperandType.Immediate)
+                                                {
+                                                    targetVa = (ulong)op.Value.Immediate;
                                                     callTypeInfo = " (branch)";
                                                 }
                                             }
@@ -439,13 +450,6 @@ namespace Il2CppDumper
 
                                         if (targetVa != 0)
                                         {
-                                            // TODO: Попытка найти имя метода по VA (FindMethodNameByVA(targetVa))
-                                            // string calledMethodName = FindMethodNameByVA(targetVa, executor, il2Cpp, metadata);
-                                            // if (!string.IsNullOrEmpty(calledMethodName)) {
-                                            //    calledMethodsAnalysis.Add($"  -> {calledMethodName} (0x{targetVa:X}){callTypeInfo}");
-                                            // } else {
-                                            //    calledMethodsAnalysis.Add($"  -> Calls VA: 0x{targetVa:X}{callTypeInfo}");
-                                            // }
                                             calledMethodsAnalysis.Add($"  -> Calls VA: 0x{targetVa:X}{callTypeInfo}");
                                         }
                                         else if (!string.IsNullOrEmpty(callTypeInfo))
@@ -455,7 +459,7 @@ namespace Il2CppDumper
                                     }
                                 }
                             }
-                            else if (methodPointer > 0 && architecture != ArchitectureType.Unknown) // Если пытались, но не вышло
+                            else if (methodPointer > 0 && architecture != ArchitectureType.Unknown)
                             {
                                 if (readMethodSize == 0 && codeBytes == null)
                                 {
@@ -496,11 +500,15 @@ namespace Il2CppDumper
 
                             string exceptionMessage = string.Join(Environment.NewLine, comments);
 
-                            var systemNotImplementedException = moduleDefinition.ImportReference(typeof(NotImplementedException));
-                            var constructor = moduleDefinition.ImportReference(systemNotImplementedException.Resolve().Methods.First(m => m.IsConstructor && m.Parameters.Count == 1 && m.Parameters[0].ParameterType.FullName == "System.String"));
+                            // Используем methodDefinition.Module для импорта ссылок
+                            var systemNotImplementedExceptionRef = methodDefinition.Module.ImportReference(typeof(NotImplementedException));
+                            // Для Resolve() лучше импортировать конструктор напрямую, если известен его тип
+                            var notImplementedCtorRef = methodDefinition.Module.ImportReference(
+                                typeof(NotImplementedException).GetConstructor(new Type[] { typeof(string) })
+                            );
 
                             ilprocessor.Append(ilprocessor.Create(OpCodes.Ldstr, exceptionMessage));
-                            ilprocessor.Append(ilprocessor.Create(OpCodes.Newobj, constructor));
+                            ilprocessor.Append(ilprocessor.Create(OpCodes.Newobj, notImplementedCtorRef)); // Исправлено на notImplementedCtorRef
                             ilprocessor.Append(ilprocessor.Create(OpCodes.Throw));
                             bodyChanged = true;
 
