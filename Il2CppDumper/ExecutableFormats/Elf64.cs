@@ -23,6 +23,7 @@ namespace Il2CppDumper
         protected override void Load()
         {
             elfHeader = ReadClass<Elf64_Ehdr>(0);
+            this.ei_machine = elfHeader.e_machine; // Присваиваем здесь
             programSegment = ReadClassArray<Elf64_Phdr>(elfHeader.e_phoff, elfHeader.e_phnum);
             if (IsDumped)
             {

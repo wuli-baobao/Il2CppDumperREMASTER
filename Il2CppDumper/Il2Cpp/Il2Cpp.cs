@@ -344,5 +344,7 @@ namespace Il2CppDumper
         {
             return pointer;
         }
+
+        public abstract ArchitectureType GetArchitectureType();
     }
 }

@@ -71,5 +71,14 @@ namespace Il2CppDumper
         }
 
         public override bool CheckDump() => false;
+
+        public override ArchitectureType GetArchitectureType()
+        {
+            // WebAssembly сама по себе не является нативной архитектурой, которую Capstone дизассемблирует напрямую.
+            // Если код Il2Cpp был скомпилирован в WASM, то это специфичный байт-код.
+            // Если это AOT-скомпилированный WASM в нативный код, то это был бы уже другой формат файла (ELF/PE/Macho).
+            // Поэтому для "чистого" WASM, который обрабатывает Il2CppDumper, возвращаем Unknown.
+            return ArchitectureType.Unknown;
+        }
     }
 }

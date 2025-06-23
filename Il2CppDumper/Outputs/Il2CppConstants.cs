@@ -69,5 +69,35 @@
         public const int PARAM_ATTRIBUTE_IN = 0x0001;
         public const int PARAM_ATTRIBUTE_OUT = 0x0002;
         public const int PARAM_ATTRIBUTE_OPTIONAL = 0x0010;
+
+        /*
+        * ELF Machine Types (e_machine)
+        */
+        public const ushort EM_NONE = 0; // No machine
+        public const ushort EM_M32 = 1; // AT&T WE 32100
+        public const ushort EM_SPARC = 2; // SPARC
+        public const ushort EM_386 = 3; // Intel 80386
+        public const ushort EM_68K = 4; // Motorola 68000
+        public const ushort EM_88K = 5; // Motorola 88000
+        // Далее много других, добавим только нужные
+        public const ushort EM_860 = 7; // Intel 80860
+        public const ushort EM_MIPS = 8; // MIPS R3000
+        // ...
+        public const ushort EM_ARM = 40; // ARM
+        public const ushort EM_X86_64 = 62; // AMD x86-64
+        public const ushort EM_AARCH64 = 183; // ARM64
+        // Добавьте другие по мере необходимости
+
+        /*
+        * Mach-O CPU Types
+        */
+        public const int CPU_ARCH_MASK = unchecked((int)0xff000000); // Mask for architecture bits
+        public const int CPU_ARCH_ABI64 = 0x01000000; // 64-bit ABI
+
+        public const int CPU_TYPE_X86 = 7;
+        public const int CPU_TYPE_X86_64 = CPU_TYPE_X86 | CPU_ARCH_ABI64;
+        public const int CPU_TYPE_ARM = 12;
+        public const int CPU_TYPE_ARM64 = CPU_TYPE_ARM | CPU_ARCH_ABI64;
+        // Добавьте другие по мере необходимости (PPC, etc.)
     }
 }

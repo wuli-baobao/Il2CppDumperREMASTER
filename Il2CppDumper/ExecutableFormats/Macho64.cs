@@ -9,6 +9,7 @@ namespace Il2CppDumper
 {
     public sealed class Macho64 : Il2Cpp
     {
+        private uint cputype_val; // Поле для хранения cputype
         private static readonly byte[] FeatureBytes1 = { 0x2, 0x0, 0x80, 0xD2 };//MOV X2, #0
         private static readonly byte[] FeatureBytes2 = { 0x3, 0x0, 0x80, 0x52 };//MOV W3, #0
         private readonly List<MachoSection64Bit> sections = new();
@@ -16,7 +17,9 @@ namespace Il2CppDumper
 
         public Macho64(Stream stream) : base(stream)
         {
-            Position += 16; //skip magic, cputype, cpusubtype, filetype
+            // magic = ReadUInt32(); // Пропускаем magic
+            this.cputype_val = ReadUInt32();
+            Position += 8; // skip cpusubtype (4 байта) and filetype (4 байта)
             var ncmds = ReadUInt32();
             Position += 12; //skip sizeofcmds, flags, reserved
             for (var i = 0; i < ncmds; i++)
@@ -283,6 +286,26 @@ namespace Il2CppDumper
                 }
             }
             return pointer;
+        }
+
+        public override ArchitectureType GetArchitectureType()
+        {
+            switch (this.cputype_val)
+            {
+                // CPU_TYPE_X86 не должен встречаться в Macho64 классе
+                case Il2CppConstants.CPU_TYPE_X86:
+                    return ArchitectureType.X86_32;
+                case Il2CppConstants.CPU_TYPE_X86_64:
+                    return ArchitectureType.X86_64;
+                // CPU_TYPE_ARM не должен встречаться в Macho64 классе
+                case Il2CppConstants.CPU_TYPE_ARM:
+                    return ArchitectureType.ARM32;
+                case Il2CppConstants.CPU_TYPE_ARM64:
+                    return ArchitectureType.ARM64;
+                default:
+                    Console.WriteLine($"[Warning Macho64.GetArchitectureType] Unknown CPU type: {this.cputype_val}. Returning Unknown.");
+                    return ArchitectureType.Unknown;
+            }
         }
     }
 }

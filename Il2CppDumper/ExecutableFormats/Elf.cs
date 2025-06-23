@@ -26,12 +26,15 @@ namespace Il2CppDumper
         public Elf(Stream stream) : base(stream)
         {
             Is32Bit = true;
+            // Чтение elfHeader должно произойти до присвоения ei_machine
+            // elfHeader читается в Load(), поэтому ei_machine нужно присваивать в Load()
             Load();
         }
 
         protected override void Load()
         {
             elfHeader = ReadClass<Elf32_Ehdr>(0);
+            this.ei_machine = elfHeader.e_machine; // Присваиваем здесь
             programSegment = ReadClassArray<Elf32_Phdr>(elfHeader.e_phoff, elfHeader.e_phnum);
             if (IsDumped)
             {
