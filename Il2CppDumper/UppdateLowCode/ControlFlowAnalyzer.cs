@@ -2,8 +2,6 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 
 namespace Il2CppDumper.UppdateLowCode
 {
@@ -16,43 +14,41 @@ namespace Il2CppDumper.UppdateLowCode
             var leaders = new HashSet<ulong>();
             var blockStarts = new Dictionary<ulong, IRBlock>();
 
-            // Step 1: Identify leaders
-            leaders.Add(0); // First instruction is always a leader
+            leaders.Add(0);
 
             for (int i = 0; i < operations.Count; i++)
             {
                 var op = operations[i];
 
-                if (op is JumpOperation jump)
+                if (op is JumpOperation jump && jump.TargetLabel != null)
                 {
                     leaders.Add(GetLabelAddress(jump.TargetLabel));
-                    if (i + 1 < operations.Count)
+                    if (i + 1 < operations.Count && operations[i + 1].Address != null)
                     {
                         leaders.Add((ulong)operations[i + 1].Address);
                     }
                 }
-                else if (op is ConditionalJumpOperation condJump)
+                else if (op is ConditionalJumpOperation condJump && condJump.TargetLabel != null)
                 {
                     leaders.Add(GetLabelAddress(condJump.TargetLabel));
-                    if (i + 1 < operations.Count)
+                    if (i + 1 < operations.Count && operations[i + 1].Address != null)
                     {
                         leaders.Add((ulong)operations[i + 1].Address);
                     }
                 }
                 else if (op is ReturnOperation)
                 {
-                    if (i + 1 < operations.Count)
+                    if (i + 1 < operations.Count && operations[i + 1].Address != null)
                     {
                         leaders.Add((ulong)operations[i + 1].Address);
                     }
                 }
             }
 
-            // Step 2: Create basic blocks
             IRBlock currentBlock = null;
             foreach (var op in operations)
             {
-                if (leaders.Contains((ulong)op.Address))
+                if (op.Address != null && leaders.Contains((ulong)op.Address))
                 {
                     currentBlock = new IRBlock
                     {
@@ -67,7 +63,6 @@ namespace Il2CppDumper.UppdateLowCode
                 {
                     currentBlock.Operations.Add(op);
 
-                    // Check for block terminators
                     if (op is JumpOperation || op is ConditionalJumpOperation || op is ReturnOperation)
                     {
                         currentBlock = null;
@@ -75,11 +70,10 @@ namespace Il2CppDumper.UppdateLowCode
                 }
             }
 
-            // Step 3: Build control flow graph
             foreach (var block in blocks)
             {
                 var lastOp = block.Operations.LastOrDefault();
-                if (lastOp is JumpOperation jump)
+                if (lastOp is JumpOperation jump && jump.TargetLabel != null)
                 {
                     var targetAddr = GetLabelAddress(jump.TargetLabel);
                     if (blockStarts.TryGetValue(targetAddr, out var targetBlock))
@@ -88,9 +82,8 @@ namespace Il2CppDumper.UppdateLowCode
                         targetBlock.Predecessors.Add(block);
                     }
                 }
-                else if (lastOp is ConditionalJumpOperation condJump)
+                else if (lastOp is ConditionalJumpOperation condJump && condJump.TargetLabel != null)
                 {
-                    // True branch
                     var targetAddr = GetLabelAddress(condJump.TargetLabel);
                     if (blockStarts.TryGetValue(targetAddr, out var trueBlock))
                     {
@@ -98,7 +91,6 @@ namespace Il2CppDumper.UppdateLowCode
                         trueBlock.Predecessors.Add(block);
                     }
 
-                    // False branch (next instruction)
                     var nextIndex = blocks.IndexOf(block) + 1;
                     if (nextIndex < blocks.Count)
                     {
@@ -109,7 +101,6 @@ namespace Il2CppDumper.UppdateLowCode
                 }
                 else if (!(lastOp is ReturnOperation))
                 {
-                    // Fall-through to next block
                     var nextIndex = blocks.IndexOf(block) + 1;
                     if (nextIndex < blocks.Count)
                     {
@@ -125,7 +116,7 @@ namespace Il2CppDumper.UppdateLowCode
 
         private ulong GetLabelAddress(string label)
         {
-            if (label.StartsWith("L_"))
+            if (label != null && label.StartsWith("L_"))
             {
                 var hexPart = label.Substring(2);
                 if (ulong.TryParse(hexPart, System.Globalization.NumberStyles.HexNumber, null, out var address))
@@ -144,7 +135,6 @@ namespace Il2CppDumper.UppdateLowCode
         public List<IRBlock> Predecessors { get; set; } = new List<IRBlock>();
         public List<IRBlock> Successors { get; set; } = new List<IRBlock>();
         public bool Visited { get; set; }
-
         public bool IsLoopHeader { get; set; }
         public IRBlock LoopEnd { get; set; }
     }

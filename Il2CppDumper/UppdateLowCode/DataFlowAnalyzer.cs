@@ -12,20 +12,21 @@ namespace Il2CppDumper.lifting
 
         public DataFlowAnalyzer(ModuleDefinition module)
         {
-            _module = module;
+            _module = module ?? throw new ArgumentNullException(nameof(module));
             _initialTypes = CreateInitialTypes();
         }
+
         private Dictionary<string, TypeReference> CreateInitialTypes()
         {
             var types = new Dictionary<string, TypeReference>(StringComparer.OrdinalIgnoreCase);
 
             try
             {
-                // Безопасное создание предопределенных типов
                 TypeReference CreateType(Type type)
                 {
                     if (_module == null)
                     {
+                        Console.WriteLine("[CreateType] Warning: _module is null, creating fallback TypeReference.");
                         return new TypeReference(type.Namespace, type.Name, null, null);
                     }
 
@@ -33,9 +34,10 @@ namespace Il2CppDumper.lifting
                     {
                         return _module.ImportReference(type);
                     }
-                    catch
+                    catch (Exception ex)
                     {
-                        return new TypeReference(type.Namespace, type.Name, null, null);
+                        Console.WriteLine($"[CreateType] Error importing type {type.FullName}: {ex.Message}");
+                        return new TypeReference(type.Namespace, type.Name, _module, null);
                     }
                 }
 
@@ -59,9 +61,9 @@ namespace Il2CppDumper.lifting
 
                 types["eflags"] = CreateType(typeof(uint));
             }
-            catch
+            catch (Exception ex)
             {
-                // Игнорируем ошибки инициализации
+                Console.WriteLine($"[CreateInitialTypes] Error initializing types: {ex.Message}");
             }
 
             return types;
@@ -69,6 +71,12 @@ namespace Il2CppDumper.lifting
 
         public Dictionary<string, TypeReference> AnalyzeTypes(List<IROperation> operations)
         {
+            if (operations == null)
+            {
+                Console.WriteLine("[AnalyzeTypes] Error: operations list is null.");
+                return new Dictionary<string, TypeReference>(_initialTypes);
+            }
+
             var typeMap = new Dictionary<string, TypeReference>(_initialTypes);
             bool changed;
             var pass = 0;
@@ -79,6 +87,8 @@ namespace Il2CppDumper.lifting
                 changed = false;
                 foreach (var op in operations)
                 {
+                    if (op == null) continue;
+
                     try
                     {
                         switch (op)
@@ -96,9 +106,9 @@ namespace Il2CppDumper.lifting
                                 break;
                         }
                     }
-                    catch
+                    catch (Exception ex)
                     {
-                        // Игнорируем ошибки при обработке отдельных операций
+                        Console.WriteLine($"[AnalyzeTypes] Error processing operation: {ex.Message}");
                     }
                 }
                 pass++;
@@ -109,15 +119,14 @@ namespace Il2CppDumper.lifting
 
         private bool ProcessAssign(AssignOperation assign, Dictionary<string, TypeReference> typeMap)
         {
-            if (assign.Destination is not RegisterOperand destReg)
+            if (assign == null || assign.Destination is not RegisterOperand destReg || string.IsNullOrEmpty(destReg.Name))
                 return false;
 
             var sourceType = InferType(assign.Source, typeMap);
             if (sourceType == null)
                 return false;
 
-            if (!typeMap.TryGetValue(destReg.Name, out var currentType) ||
-                !AreTypesCompatible(currentType, sourceType))
+            if (!typeMap.TryGetValue(destReg.Name, out var currentType) || !DataFlowAnalyzer.AreTypesCompatible(currentType, sourceType))
             {
                 typeMap[destReg.Name] = sourceType;
                 return true;
@@ -127,20 +136,14 @@ namespace Il2CppDumper.lifting
 
         private bool ProcessBinary(BinaryOperation binary, Dictionary<string, TypeReference> typeMap)
         {
-            if (binary.Destination is not RegisterOperand destReg)
+            if (binary == null || binary.Destination is not RegisterOperand destReg || string.IsNullOrEmpty(destReg.Name))
                 return false;
 
-            var resultType = InferBinaryResultType(
-                binary.OperationType,
-                binary.Left,
-                binary.Right,
-                typeMap);
-
+            var resultType = InferBinaryResultType(binary.OperationType, binary.Left, binary.Right, typeMap);
             if (resultType == null)
                 return false;
 
-            if (!typeMap.TryGetValue(destReg.Name, out var currentType) ||
-                !AreTypesCompatible(currentType, resultType))
+            if (!typeMap.TryGetValue(destReg.Name, out var currentType) || !DataFlowAnalyzer.AreTypesCompatible(currentType, resultType))
             {
                 typeMap[destReg.Name] = resultType;
                 return true;
@@ -150,13 +153,17 @@ namespace Il2CppDumper.lifting
 
         private bool ProcessCall(CallOperation call, Dictionary<string, TypeReference> typeMap)
         {
-            if (call.Destination is not RegisterOperand destReg)
+            if (call == null || call.Destination is not RegisterOperand destReg || string.IsNullOrEmpty(destReg.Name))
                 return false;
 
             var returnType = call.Method?.ReturnType ?? SafeGetObjectType();
+            if (returnType == null)
+            {
+                Console.WriteLine("[ProcessCall] Error: returnType is null.");
+                return false;
+            }
 
-            if (!typeMap.TryGetValue(destReg.Name, out var currentType) ||
-                !AreTypesCompatible(currentType, returnType))
+            if (!typeMap.TryGetValue(destReg.Name, out var currentType) || !DataFlowAnalyzer.AreTypesCompatible(currentType, returnType))
             {
                 typeMap[destReg.Name] = returnType;
                 return true;
@@ -167,62 +174,57 @@ namespace Il2CppDumper.lifting
         private TypeReference InferType(IROperand operand, Dictionary<string, TypeReference> typeMap)
         {
             if (operand == null)
+            {
+                Console.WriteLine("[InferType] Warning: operand is null, returning Object type.");
                 return SafeGetObjectType();
+            }
 
             try
             {
                 return operand switch
                 {
-                    RegisterOperand reg =>
-                        GetRegisterType(reg, typeMap),
-
-                    ConstantOperand con =>
-                        con.Type ?? GetTypeForConstant(con.Value),
-
-                    MemoryOperand mem =>
-                        mem.Type ?? SafeGetObjectType(),
-
+                    RegisterOperand reg => GetRegisterType(reg, typeMap),
+                    ConstantOperand con => con.Type ?? GetTypeForConstant(con.Value),
+                    MemoryOperand mem => mem.Type ?? SafeGetObjectType(),
                     _ => SafeGetObjectType()
                 };
             }
-            catch
+            catch (Exception ex)
             {
+                Console.WriteLine($"[InferType] Error inferring type: {ex.Message}");
                 return SafeGetObjectType();
             }
         }
 
         private TypeReference GetRegisterType(RegisterOperand reg, Dictionary<string, TypeReference> typeMap)
         {
-            if (string.IsNullOrEmpty(reg?.Name))
+            if (reg == null || string.IsNullOrEmpty(reg.Name))
+            {
+                Console.WriteLine("[GetRegisterType] Warning: reg or reg.Name is null.");
                 return SafeGetObjectType();
+            }
 
             try
             {
-                // 1. Проверяем текущий тип в typeMap
                 if (typeMap != null && typeMap.TryGetValue(reg.Name, out var currentType))
                     return currentType;
 
-                // 2. Проверяем предопределенные типы
                 if (_initialTypes != null && _initialTypes.TryGetValue(reg.Name, out var initType))
                     return initType;
 
-                // 3. Определяем тип по имени регистра
                 return reg.Name.ToLower() switch
                 {
                     "eax" or "ebx" or "ecx" or "edx" or "esi" or "edi" or "ebp" or "esp"
                         => CreateFallbackType("System", "Int32"),
-
                     "rax" or "rbx" or "rcx" or "rdx" or "rsi" or "rdi" or "rbp" or "rsp"
                         => CreateFallbackType("System", "Int64"),
-
-                    "eflags"
-                        => CreateFallbackType("System", "UInt32"),
-
+                    "eflags" => CreateFallbackType("System", "UInt32"),
                     _ => SafeGetObjectType()
                 };
             }
-            catch
+            catch (Exception ex)
             {
+                Console.WriteLine($"[GetRegisterType] Error getting register type: {ex.Message}");
                 return SafeGetObjectType();
             }
         }
@@ -231,19 +233,31 @@ namespace Il2CppDumper.lifting
         {
             try
             {
-                // 1. Проверяем, что _module и TypeSystem не null
-                if (_module != null && _module.TypeSystem != null && _module.TypeSystem.Object != null)
+                if (_module == null)
                 {
-                    Console.WriteLine(_module.TypeSystem.Object.ToString());
-                    return _module.TypeSystem.Object;
+                    Console.WriteLine("[SafeGetObjectType] Error: _module is null.");
+                    return new TypeReference("System", "Object", null, null);
                 }
-                // 2. Создаем TypeReference безопасно
-                return new TypeReference("System", "Object", null, null);
+
+                if (_module.TypeSystem == null)
+                {
+                    Console.WriteLine("[SafeGetObjectType] Error: _module.TypeSystem is null.");
+                    return new TypeReference("System", "Object", _module, null);
+                }
+
+                if (_module.TypeSystem.Object == null)
+                {
+                    Console.WriteLine("[SafeGetObjectType] Error: _module.TypeSystem.Object is null.");
+                    var fallbackRef = new TypeReference("System", "Object", _module, null);
+                    return fallbackRef;
+                }
+
+                return _module.TypeSystem.Object;
             }
-            catch
+            catch (Exception ex)
             {
-                // 3. Используем резервный вариант
-                return new TypeReference("System", "Object", null, null);
+                Console.WriteLine($"[SafeGetObjectType] Exception occurred: {ex.Message}\nStackTrace: {ex.StackTrace}");
+                return new TypeReference("System", "Object", _module, null);
             }
         }
 
@@ -251,20 +265,22 @@ namespace Il2CppDumper.lifting
         {
             try
             {
-                // Всегда создаем новый TypeReference вместо импорта
-                return new TypeReference(@namespace, name, null, null);
+                return new TypeReference(@namespace, name, _module, null);
             }
-            catch
+            catch (Exception ex)
             {
-                // Возвращаем тип Object при ошибке
-                return SafeGetObjectType();
+                Console.WriteLine($"[CreateFallbackType] Error creating fallback type: {ex.Message}");
+                return new TypeReference("System", "Object", _module, null);
             }
         }
 
         private TypeReference GetTypeForConstant(object value)
         {
             if (value == null)
+            {
+                Console.WriteLine("[GetTypeForConstant] Warning: value is null.");
                 return SafeGetObjectType();
+            }
 
             try
             {
@@ -281,41 +297,31 @@ namespace Il2CppDumper.lifting
                     _ => SafeGetObjectType()
                 };
             }
-            catch
+            catch (Exception ex)
             {
+                Console.WriteLine($"[GetTypeForConstant] Error getting constant type: {ex.Message}");
                 return SafeGetObjectType();
             }
         }
 
-        private TypeReference InferBinaryResultType(
-            BinaryOperationType opType,
-            IROperand left,
-            IROperand right,
-            Dictionary<string, TypeReference> typeMap)
+        private TypeReference InferBinaryResultType(BinaryOperationType opType, IROperand left, IROperand right, Dictionary<string, TypeReference> typeMap)
         {
             var leftType = InferType(left, typeMap);
             var rightType = InferType(right, typeMap);
 
+            if (leftType == null || rightType == null)
+            {
+                Console.WriteLine("[InferBinaryResultType] Warning: leftType or rightType is null.");
+                return SafeGetObjectType();
+            }
+
             return opType switch
             {
-                BinaryOperationType.Add or
-                BinaryOperationType.Sub or
-                BinaryOperationType.Mul or
-                BinaryOperationType.Div or
-                BinaryOperationType.Rem
-                    => NumericResultType(leftType, rightType),
-
-                BinaryOperationType.And or
-                BinaryOperationType.Or or
-                BinaryOperationType.Xor
-                    => LogicalResultType(leftType, rightType),
-
-                BinaryOperationType.Equal or
-                BinaryOperationType.NotEqual or
-                BinaryOperationType.GreaterThan or
-                BinaryOperationType.LessThan
-                    => _module?.TypeSystem?.Boolean ?? CreateFallbackType("System", "Boolean"),
-
+                BinaryOperationType.Add or BinaryOperationType.Sub or BinaryOperationType.Mul or
+                BinaryOperationType.Div or BinaryOperationType.Rem => NumericResultType(leftType, rightType),
+                BinaryOperationType.And or BinaryOperationType.Or or BinaryOperationType.Xor => LogicalResultType(leftType, rightType),
+                BinaryOperationType.Equal or BinaryOperationType.NotEqual or BinaryOperationType.GreaterThan or
+                BinaryOperationType.LessThan => _module?.TypeSystem?.Boolean ?? CreateFallbackType("System", "Boolean"),
                 _ => SafeGetObjectType()
             };
         }
@@ -323,7 +329,10 @@ namespace Il2CppDumper.lifting
         private TypeReference NumericResultType(TypeReference left, TypeReference right)
         {
             if (left == null || right == null)
+            {
+                Console.WriteLine("[NumericResultType] Warning: left or right type is null.");
                 return SafeGetObjectType();
+            }
 
             var numericTypes = new Dictionary<string, int>
             {
@@ -341,10 +350,8 @@ namespace Il2CppDumper.lifting
 
             int GetPriority(TypeReference type)
             {
-                var fullName = type.FullName;
-                return numericTypes.TryGetValue(fullName, out var priority)
-                    ? priority
-                    : -1;
+                var fullName = type?.FullName;
+                return fullName != null && numericTypes.TryGetValue(fullName, out var priority) ? priority : -1;
             }
 
             var leftPriority = GetPriority(left);
@@ -358,6 +365,12 @@ namespace Il2CppDumper.lifting
 
         private TypeReference LogicalResultType(TypeReference left, TypeReference right)
         {
+            if (left == null || right == null)
+            {
+                Console.WriteLine("[LogicalResultType] Warning: left or right type is null.");
+                return SafeGetObjectType();
+            }
+
             if (IsIntegerType(left) && IsIntegerType(right))
                 return NumericResultType(left, right);
 
@@ -366,22 +379,28 @@ namespace Il2CppDumper.lifting
 
         private bool IsIntegerType(TypeReference type)
         {
-            if (type == null) return false;
+            if (type == null)
+            {
+                Console.WriteLine("[IsIntegerType] Warning: type is null.");
+                return false;
+            }
 
             var fullName = type.FullName;
             return fullName switch
             {
-                "System.Byte" or "System.SByte" or
-                "System.Int16" or "System.UInt16" or
-                "System.Int32" or "System.UInt32" or
-                "System.Int64" or "System.UInt64" => true,
+                "System.Byte" or "System.SByte" or "System.Int16" or "System.UInt16" or
+                "System.Int32" or "System.UInt32" or "System.Int64" or "System.UInt64" => true,
                 _ => false
             };
         }
 
-        private bool AreTypesCompatible(TypeReference type1, TypeReference type2)
+        private static bool AreTypesCompatible(TypeReference type1, TypeReference type2)
         {
-            if (type1 == null || type2 == null) return false;
+            if (type1 == null || type2 == null)
+            {
+                Console.WriteLine("[AreTypesCompatible] Warning: type1 or type2 is null.");
+                return false;
+            }
             return type1.FullName == type2.FullName;
         }
     }

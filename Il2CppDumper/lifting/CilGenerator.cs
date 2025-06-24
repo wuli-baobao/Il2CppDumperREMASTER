@@ -120,6 +120,8 @@ namespace Il2CppDumper.lifting
             }
         }
 
+        // Запоминаем адреса инструкций
+        /*
         private void RecordInstructionAddress(IROperation op, Instruction startInstruction)
         {
             var firstNewInstruction = startInstruction != null
@@ -132,6 +134,7 @@ namespace Il2CppDumper.lifting
                 addressToInstruction[address] = firstNewInstruction;
             }
         }
+        */
 
         public Instruction GetInstruction(ulong address)
         {

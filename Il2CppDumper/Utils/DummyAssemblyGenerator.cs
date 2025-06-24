@@ -741,32 +741,46 @@ namespace Il2CppDumper
 
         private void GenerateMethodBody(MethodDefinition methodDefinition, byte[] codeBytes, ulong methodPointer, ArchitectureType architecture)
         {
+            if (methodDefinition == null || methodDefinition.Body == null)
+            {
+                Console.WriteLine("[GenerateMethodBody] Error: methodDefinition or its Body is null.");
+                GenerateFallbackBody(methodDefinition, "methodDefinition or Body is null");
+                return;
+            }
+
             try
             {
                 var ilprocessor = methodDefinition.Body.GetILProcessor();
+                if (ilprocessor == null)
+                {
+                    Console.WriteLine("[GenerateMethodBody] Error: ILProcessor is null.");
+                    GenerateFallbackBody(methodDefinition, "ILProcessor is null");
+                    return;
+                }
+
                 ilprocessor.Body.Instructions.Clear();
                 ilprocessor.Body.Variables.Clear();
                 ilprocessor.Body.ExceptionHandlers.Clear();
 
                 int pointerSize = (architecture == ArchitectureType.X86_64 || architecture == ArchitectureType.ARM64) ? 8 : 4;
 
-                // Дизассемблирование
-                var disassembledInstructions = MethodDisassembler.Disassemble(
-                    codeBytes,
-                    methodPointer,
-                    architecture
-                );
-
+                var disassembledInstructions = MethodDisassembler.Disassemble(codeBytes, methodPointer, architecture);
                 if (disassembledInstructions == null || !disassembledInstructions.Any())
                 {
+                    Console.WriteLine("[GenerateMethodBody] Disassembly failed or no instructions.");
                     GenerateFallbackBody(methodDefinition, "Disassembly failed or no instructions");
                     return;
                 }
 
-                // Лифтинг в промежуточное представление
                 var lifter = new Lifter(methodDefinition.Module, pointerSize);
-                List<IROperation> liftedOperations;
+                if (lifter == null)
+                {
+                    Console.WriteLine("[GenerateMethodBody] Error: Lifter is null.");
+                    GenerateFallbackBody(methodDefinition, "Lifter is null");
+                    return;
+                }
 
+                List<IROperation> liftedOperations;
                 try
                 {
                     liftedOperations = lifter.Lift(disassembledInstructions);
@@ -776,28 +790,28 @@ namespace Il2CppDumper
                     Console.WriteLine($"[GenerateMethodBody] Lifting failed: {liftEx}");
                     liftedOperations = new List<IROperation>
             {
-                new ErrorOperation
-                {
-                    Address = methodPointer,
-                    Message = $"Lifting failed: {liftEx.Message}"
-                }
+                new ErrorOperation { Address = methodPointer, Message = $"Lifting failed: {liftEx.Message}" }
             };
                 }
 
-                // Убрали анализ типов и оптимизацию - они будут выполняться позже
-                // в контексте CilGenerator, где все данные готовы
+                if (liftedOperations == null)
+                {
+                    Console.WriteLine("[GenerateMethodBody] Lifted operations are null.");
+                    GenerateFallbackBody(methodDefinition, "Lifted operations are null");
+                    return;
+                }
 
-                // Control flow analysis (только структурирование)
                 var cfAnalyzer = new ControlFlowAnalyzer();
                 var blocks = cfAnalyzer.StructureBlocks(liftedOperations);
+                if (blocks == null)
+                {
+                    Console.WriteLine("[GenerateMethodBody] Control flow analysis failed.");
+                    GenerateFallbackBody(methodDefinition, "Control flow analysis failed");
+                    return;
+                }
 
-                // Generate structured CIL
                 var cilGenerator = new CilGenerator(ilprocessor, methodDefinition, this);
-
-                // Передаем лифтированные операции напрямую
                 cilGenerator.Generate(liftedOperations);
-
-                // Add structured exception handling
                 ReconstructExceptionHandling(blocks, cilGenerator, methodDefinition);
 
                 Console.WriteLine($"[GenerateMethodBody] Successfully generated CIL for {methodDefinition.FullName}");

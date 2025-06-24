@@ -216,10 +216,11 @@ namespace Il2CppDumper
         private void ProcessingMetadataUsage()
         {
             metadataUsageDic = new Dictionary<Il2CppMetadataUsage, SortedDictionary<uint, uint>>();
-            for (uint i = 1; i <= 6; i++)
+            foreach (Il2CppMetadataUsage usage in Enum.GetValues(typeof(Il2CppMetadataUsage)))
             {
-                metadataUsageDic[(Il2CppMetadataUsage)i] = new SortedDictionary<uint, uint>();
+                metadataUsageDic[usage] = new SortedDictionary<uint, uint>();
             }
+
             foreach (var metadataUsageList in metadataUsageLists)
             {
                 for (int i = 0; i < metadataUsageList.count; i++)
@@ -227,16 +228,33 @@ namespace Il2CppDumper
                     var offset = metadataUsageList.start + i;
                     if (offset >= metadataUsagePairs.Length)
                     {
+                        Console.WriteLine($"[Metadata] Warning: Invalid offset {offset} in metadataUsageList (start={metadataUsageList.start}, count={metadataUsageList.count})");
                         continue;
                     }
                     var metadataUsagePair = metadataUsagePairs[offset];
                     var usage = GetEncodedIndexType(metadataUsagePair.encodedSourceIndex);
                     var decodedIndex = GetDecodedMethodIndex(metadataUsagePair.encodedSourceIndex);
+
+                    if (!Enum.IsDefined(typeof(Il2CppMetadataUsage), usage))
+                    {
+                        Console.WriteLine($"[Metadata] Warning: Unknown metadata usage value {usage} at offset {offset}. Skipping.");
+                        continue;
+                    }
+
+                    if (usage == (uint)Il2CppMetadataUsage.kIl2CppMetadataUsageInvalid)
+                    {
+                        Console.WriteLine($"[Metadata] Warning: Encountered kIl2CppMetadataUsageInvalid at offset {offset}, destinationIndex={metadataUsagePair.destinationIndex}");
+                        continue;
+                    }
+
                     metadataUsageDic[(Il2CppMetadataUsage)usage][metadataUsagePair.destinationIndex] = decodedIndex;
                 }
             }
-            //metadataUsagesCount = metadataUsagePairs.Max(x => x.destinationIndex) + 1;
-            metadataUsagesCount = metadataUsageDic.Max(x => x.Value.Select(y => y.Key).DefaultIfEmpty().Max()) + 1;
+
+            metadataUsagesCount = metadataUsageDic.Any(x => x.Value.Any())
+                ? metadataUsageDic.Max(x => Enumerable.DefaultIfEmpty<uint>(x.Value.Select(y => y.Key), 0).Max()) + 1
+                : 0;
+
         }
 
         public static uint GetEncodedIndexType(uint index)
