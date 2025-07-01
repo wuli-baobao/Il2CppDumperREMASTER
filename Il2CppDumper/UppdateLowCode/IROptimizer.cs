@@ -74,14 +74,16 @@ namespace Il2CppDumper.UppdateLowCode
 
             return optimized;
         }
-
         private bool TryConstantFold(BinaryOperation binOp, out IROperand result)
         {
             result = null;
-
-            if (binOp.Left is ConstantOperand leftConst &&
-                binOp.Right is ConstantOperand rightConst)
+            if (binOp.Left is ConstantOperand leftConst && binOp.Right is ConstantOperand rightConst)
             {
+                if (leftConst.Value == null || rightConst.Value == null)
+                {
+                    Console.WriteLine("[TryConstantFold] Warning: Constant value is null.");
+                    return false;
+                }
                 try
                 {
                     object value = binOp.OperationType switch
@@ -95,23 +97,17 @@ namespace Il2CppDumper.UppdateLowCode
                         BinaryOperationType.Xor => Convert.ToInt64(leftConst.Value) ^ Convert.ToInt64(rightConst.Value),
                         _ => null
                     };
-
                     if (value != null)
                     {
-                        result = new ConstantOperand
-                        {
-                            Value = value,
-                            Type = binOp.Left.Type
-                        };
+                        result = new ConstantOperand { Value = value, Type = binOp.Left.Type };
                         return true;
                     }
                 }
-                catch
+                catch (Exception ex)
                 {
-                    // Ignore conversion errors
+                    Console.WriteLine($"[TryConstantFold] Error folding constants: {ex.Message}");
                 }
             }
-
             return false;
         }
 

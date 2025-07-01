@@ -235,15 +235,15 @@ namespace Il2CppDumper
                     var usage = GetEncodedIndexType(metadataUsagePair.encodedSourceIndex);
                     var decodedIndex = GetDecodedMethodIndex(metadataUsagePair.encodedSourceIndex);
 
-                    if (!Enum.IsDefined(typeof(Il2CppMetadataUsage), usage))
+                    if (!Enum.IsDefined(typeof(Il2CppMetadataUsage), (int)usage))
                     {
                         Console.WriteLine($"[Metadata] Warning: Unknown metadata usage value {usage} at offset {offset}. Skipping.");
                         continue;
                     }
 
-                    if (usage == (uint)Il2CppMetadataUsage.kIl2CppMetadataUsageInvalid)
+                    if (usage > (uint)Il2CppMetadataUsage.kIl2CppMetadataUsageMethodRef)
                     {
-                        Console.WriteLine($"[Metadata] Warning: Encountered kIl2CppMetadataUsageInvalid at offset {offset}, destinationIndex={metadataUsagePair.destinationIndex}");
+                        Console.WriteLine($"[Metadata] Warning: Unknown metadata usage value {usage} at offset {offset}. Skipping.");
                         continue;
                     }
 

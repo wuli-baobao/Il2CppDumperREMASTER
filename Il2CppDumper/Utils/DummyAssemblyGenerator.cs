@@ -8,10 +8,8 @@ using Mono.Cecil;
 using Mono.Cecil.Cil;
 using Mono.Cecil.Rocks;
 using Mono.Collections.Generic;
-using Mono.CompilerServices.SymbolWriter;
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.IO;
 using System.Linq;
 
@@ -27,6 +25,10 @@ namespace Il2CppDumper
         private readonly Dictionary<Il2CppTypeDefinition, TypeDefinition> typeDefinitionDic = new();
         private readonly Dictionary<Il2CppGenericParameter, GenericParameter> genericParameterDic = new();
         private readonly MethodDefinition attributeAttribute;
+        private readonly MethodDefinition addressAttribute;
+        private readonly MethodDefinition fieldOffsetAttribute;
+        private readonly MethodDefinition metadataOffsetAttribute;
+        private readonly MethodDefinition tokenAttribute;
         private readonly TypeReference stringType;
         private readonly TypeSystem typeSystem;
         private readonly Dictionary<ulong, MethodDefinition> addressToMethodMap = new();
@@ -36,23 +38,88 @@ namespace Il2CppDumper
 
         public DummyAssemblyGenerator(Il2CppExecutor il2CppExecutor, bool addToken)
         {
-            executor = il2CppExecutor;
-            metadata = il2CppExecutor.metadata;
-            il2Cpp = il2CppExecutor.il2Cpp;
+            executor = il2CppExecutor ?? throw new ArgumentNullException(nameof(il2CppExecutor));
+            metadata = il2CppExecutor.metadata ?? throw new ArgumentNullException(nameof(il2CppExecutor.metadata));
+            il2Cpp = il2CppExecutor.il2Cpp ?? throw new ArgumentNullException(nameof(il2CppExecutor.il2Cpp));
 
-            //Il2CppDummyDll
-            var il2CppDummyDll = AssemblyDefinition.ReadAssembly(new MemoryStream(Resource1.Il2CppDummyDll));
+            // Загрузка Il2CppDummyDll
+            AssemblyDefinition il2CppDummyDll;
+            try
+            {
+                il2CppDummyDll = AssemblyDefinition.ReadAssembly(new MemoryStream(Resource1.Il2CppDummyDll));
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[DummyAssemblyGenerator] Ошибка загрузки Il2CppDummyDll: {ex.Message}\nStackTrace: {ex.StackTrace}");
+                throw new InvalidOperationException("Не удалось загрузить Il2CppDummyDll.", ex);
+            }
+
+            if (il2CppDummyDll?.MainModule?.TypeSystem?.Object == null)
+            {
+                Console.WriteLine("[DummyAssemblyGenerator] Ошибка: TypeSystem.Object в Il2CppDummyDll равен null.");
+                throw new InvalidOperationException("TypeSystem.Object в Il2CppDummyDll равен null.");
+            }
+
             Assemblies.Add(il2CppDummyDll);
             var dummyMD = il2CppDummyDll.MainModule;
-            var addressAttribute = dummyMD.Types.First(x => x.Name == "AddressAttribute").Methods[0];
-            var fieldOffsetAttribute = dummyMD.Types.First(x => x.Name == "FieldOffsetAttribute").Methods[0];
-            attributeAttribute = dummyMD.Types.First(x => x.Name == "AttributeAttribute").Methods[0];
-            var metadataOffsetAttribute = dummyMD.Types.First(x => x.Name == "MetadataOffsetAttribute").Methods[0];
-            var tokenAttribute = dummyMD.Types.First(x => x.Name == "TokenAttribute").Methods[0];
+
+            if (dummyMD.TypeSystem == null || dummyMD.TypeSystem.Object == null)
+            {
+                Console.WriteLine("[DummyAssemblyGenerator] Ошибка: TypeSystem или TypeSystem.Object в dummyMD равен null.");
+                throw new InvalidOperationException("TypeSystem или TypeSystem.Object в dummyMD равен null.");
+            }
+
             stringType = dummyMD.TypeSystem.String;
             typeSystem = dummyMD.TypeSystem;
 
+            // Проверка наличия необходимых типов атрибутов
+            try
+            {
+                var addressAttributeType = dummyMD.Types.FirstOrDefault(x => x.Name == "AddressAttribute");
+                if (addressAttributeType == null || !addressAttributeType.Methods.Any())
+                {
+                    throw new InvalidOperationException("Тип AddressAttribute не найден или не содержит методов в Il2CppDummyDll.");
+                }
+                addressAttribute = addressAttributeType.Methods[0];
+
+                var fieldOffsetAttributeType = dummyMD.Types.FirstOrDefault(x => x.Name == "FieldOffsetAttribute");
+                if (fieldOffsetAttributeType == null || !fieldOffsetAttributeType.Methods.Any())
+                {
+                    throw new InvalidOperationException("Тип FieldOffsetAttribute не найден или не содержит методов в Il2CppDummyDll.");
+                }
+                fieldOffsetAttribute = fieldOffsetAttributeType.Methods[0];
+
+                var attributeAttributeType = dummyMD.Types.FirstOrDefault(x => x.Name == "AttributeAttribute");
+                if (attributeAttributeType == null || !attributeAttributeType.Methods.Any())
+                {
+                    throw new InvalidOperationException("Тип AttributeAttribute не найден или не содержит методов в Il2CppDummyDll.");
+                }
+                attributeAttribute = attributeAttributeType.Methods[0];
+
+                var metadataOffsetAttributeType = dummyMD.Types.FirstOrDefault(x => x.Name == "MetadataOffsetAttribute");
+                if (metadataOffsetAttributeType == null || !metadataOffsetAttributeType.Methods.Any())
+                {
+                    throw new InvalidOperationException("Тип MetadataOffsetAttribute не найден или не содержит методов в Il2CppDummyDll.");
+                }
+                metadataOffsetAttribute = metadataOffsetAttributeType.Methods[0];
+
+                var tokenAttributeType = dummyMD.Types.FirstOrDefault(x => x.Name == "TokenAttribute");
+                if (tokenAttributeType == null || !tokenAttributeType.Methods.Any())
+                {
+                    throw new InvalidOperationException("Тип TokenAttribute не найден или не содержит методов в Il2CppDummyDll.");
+                }
+                tokenAttribute = tokenAttributeType.Methods[0];
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[DummyAssemblyGenerator] Ошибка доступа к типам атрибутов: {ex.Message}\nStackTrace: {ex.StackTrace}");
+                throw new InvalidOperationException("Не удалось инициализировать типы атрибутов из Il2CppDummyDll.", ex);
+            }
+
+            // Инициализация резолвера
             var resolver = new MyAssemblyResolver();
+            var frameworkDir = Path.GetDirectoryName(typeof(object).Assembly.Location); // Путь к .NET Framework
+            resolver.AddSearchDirectory(frameworkDir);
             var moduleParameters = new ModuleParameters
             {
                 Kind = ModuleKind.Dll,
@@ -60,15 +127,47 @@ namespace Il2CppDumper
             };
             resolver.Register(il2CppDummyDll);
 
+            // Загрузка mscorlib.dll из директории .NET Framework
+            AssemblyDefinition mscorlib;
+            TypeReference systemObjectType;
+            try
+            {
+                var mscorlibPath = Path.Combine(frameworkDir, "mscorlib.dll");
+                if (!File.Exists(mscorlibPath))
+                {
+                    Console.WriteLine($"[DummyAssemblyGenerator] Ошибка: mscorlib.dll не найден по пути {mscorlibPath}.");
+                    throw new FileNotFoundException($"mscorlib.dll не найден по пути {mscorlibPath}.");
+                }
+                mscorlib = AssemblyDefinition.ReadAssembly(mscorlibPath);
+                if (mscorlib?.MainModule?.TypeSystem?.Object == null)
+                {
+                    Console.WriteLine("[DummyAssemblyGenerator] Ошибка: TypeSystem.Object в mscorlib.dll равен null.");
+                    throw new InvalidOperationException("TypeSystem.Object в mscorlib.dll равен null.");
+                }
+                systemObjectType = mscorlib.MainModule.TypeSystem.Object;
+                resolver.Register(mscorlib);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[DummyAssemblyGenerator] Ошибка загрузки mscorlib.dll: {ex.Message}\nStackTrace: {ex.StackTrace}");
+                throw new InvalidOperationException("Не удалось загрузить mscorlib.dll из директории .NET Framework.", ex);
+            }
+
             var parameterDefinitionDic = new Dictionary<int, ParameterDefinition>();
             var eventDefinitionDic = new Dictionary<int, EventDefinition>();
 
-            //创建程序集，同时创建所有类
+            // Создание сборок
             foreach (var imageDef in metadata.imageDefs)
             {
                 var imageName = metadata.GetStringFromIndex(imageDef.nameIndex);
                 var aname = metadata.assemblyDefs[imageDef.assemblyIndex].aname;
                 var assemblyName = metadata.GetStringFromIndex(aname.nameIndex);
+                // Избегаем конфликта имени с mscorlib
+                if (assemblyName.Equals("mscorlib", StringComparison.OrdinalIgnoreCase))
+                {
+                    assemblyName = $"Generated_{assemblyName}_{Guid.NewGuid().ToString("N").Substring(0, 8)}";
+                    Console.WriteLine($"[DummyAssemblyGenerator] Переименована сборка 'mscorlib' в '{assemblyName}' для избежания конфликта.");
+                }
                 Version vers;
                 if (aname.build >= 0)
                 {
@@ -76,20 +175,47 @@ namespace Il2CppDumper
                 }
                 else
                 {
-                    //__Generated
-                    vers = new Version(3, 7, 1, 6);
+                    vers = new Version(4, 0, 0, 0); // Версия по умолчанию, совместимая с mscorlib
                 }
                 var assemblyNameDef = new AssemblyNameDefinition(assemblyName, vers);
-                /*assemblyNameDef.Culture = metadata.GetStringFromIndex(aname.cultureIndex);
-                assemblyNameDef.PublicKey = Encoding.UTF8.GetBytes(metadata.GetStringFromIndex(aname.publicKeyIndex));
-                assemblyNameDef.HashAlgorithm = (AssemblyHashAlgorithm)aname.hash_alg;
-                assemblyNameDef.Attributes = (AssemblyAttributes)aname.flags;
-                assemblyNameDef.PublicKeyToken = aname.public_key_token;*/
-                var assemblyDefinition = AssemblyDefinition.CreateAssembly(assemblyNameDef, imageName, moduleParameters);
+                AssemblyDefinition assemblyDefinition;
+                try
+                {
+                    assemblyDefinition = AssemblyDefinition.CreateAssembly(assemblyNameDef, imageName, moduleParameters);
+                    var module = assemblyDefinition.MainModule;
+                    // Добавление ссылки на mscorlib.dll
+                    var mscorlibReference = new AssemblyNameReference("mscorlib", new Version(4, 0, 0, 0));
+                    if (!module.AssemblyReferences.Any(r => r.Name == "mscorlib"))
+                    {
+                        module.AssemblyReferences.Add(mscorlibReference);
+                        Console.WriteLine($"[DummyAssemblyGenerator] Добавлена ссылка на mscorlib для сборки {assemblyName}.");
+                    }
+                    // Импорт System.Object из mscorlib.dll
+                    var importedObjectType = module.ImportReference(systemObjectType);
+                    if (importedObjectType == null)
+                    {
+                        Console.WriteLine($"[DummyAssemblyGenerator] Ошибка: Не удалось импортировать System.Object для сборки {assemblyName}.");
+                        throw new InvalidOperationException($"Не удалось импортировать System.Object для сборки {assemblyName}.");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[DummyAssemblyGenerator] Ошибка создания сборки {assemblyName}: {ex.Message}\nStackTrace: {ex.StackTrace}");
+                    throw new InvalidOperationException($"Не удалось создать сборку {assemblyName}.", ex);
+                }
+
                 resolver.Register(assemblyDefinition);
                 Assemblies.Add(assemblyDefinition);
                 var moduleDefinition = assemblyDefinition.MainModule;
-                moduleDefinition.Types.Clear();//清除自动创建的<Module>类
+
+                // Проверка TypeSystem для новой сборки
+                if (moduleDefinition.TypeSystem == null || moduleDefinition.TypeSystem.Object == null)
+                {
+                    Console.WriteLine($"[DummyAssemblyGenerator] Ошибка: TypeSystem или TypeSystem.Object равен null для сборки {assemblyName}.");
+                    throw new InvalidOperationException($"TypeSystem или TypeSystem.Object равен null для сборки {assemblyName}.");
+                }
+
+                moduleDefinition.Types.Clear(); // Очистка автоматически созданного класса <Module>
                 var typeEnd = imageDef.typeStart + imageDef.typeCount;
                 for (var index = imageDef.typeStart; index < typeEnd; ++index)
                 {
@@ -104,6 +230,8 @@ namespace Il2CppDumper
                     }
                 }
             }
+
+            // Обработка вложенных типов
             foreach (var imageDef in metadata.imageDefs)
             {
                 var typeEnd = imageDef.typeStart + imageDef.typeCount;
@@ -112,7 +240,7 @@ namespace Il2CppDumper
                     var typeDef = metadata.typeDefs[index];
                     var typeDefinition = typeDefinitionDic[typeDef];
 
-                    //nestedtype
+                    // Вложенные типы
                     for (int i = 0; i < typeDef.nested_type_count; i++)
                     {
                         var nestedIndex = metadata.nestedTypeIndices[typeDef.nestedTypesStart + i];
@@ -506,36 +634,6 @@ namespace Il2CppDumper
             }
         }
 
-        private void BuildAddressMap()
-        {
-            foreach (var assembly in Assemblies)
-            {
-                foreach (var module in assembly.Modules)
-                {
-                    foreach (var type in module.Types)
-                    {
-                        foreach (var method in type.Methods)
-                        {
-                            var addressAttr = method.CustomAttributes
-                                .FirstOrDefault(a => a.AttributeType.Name == "AddressAttribute");
-
-                            if (addressAttr != null)
-                            {
-                                var vaField = addressAttr.Fields.FirstOrDefault(f => f.Name == "VA");
-                                if (vaField.Argument.Value is string vaStr)
-                                {
-                                    if (ulong.TryParse(vaStr?.Substring(2), NumberStyles.HexNumber, null, out var va))
-                                    {
-                                        addressToMethodMap[va] = method;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
         private TypeReference GetTypeReferenceWithByRef(MemberReference memberReference, Il2CppType il2CppType)
         {
             var typeReference = GetTypeReference(memberReference, il2CppType);
@@ -551,6 +649,7 @@ namespace Il2CppDumper
 
         private TypeReference GetTypeReference(MemberReference memberReference, Il2CppType il2CppType)
         {
+            if (il2CppType == null) throw new ArgumentNullException(nameof(il2CppType));
             var moduleDefinition = memberReference.Module;
             switch (il2CppType.type)
             {
@@ -772,6 +871,13 @@ namespace Il2CppDumper
                     return;
                 }
 
+                if (methodDefinition.Module == null || methodDefinition.Module.TypeSystem == null)
+                {
+                    Console.WriteLine($"[GenerateMethodBody] Error: Module or TypeSystem is null for {methodDefinition.FullName}");
+                    GenerateFallbackBody(methodDefinition, "Module or TypeSystem is null");
+                    return;
+                }
+
                 var lifter = new Lifter(methodDefinition.Module, pointerSize);
                 if (lifter == null)
                 {
@@ -812,7 +918,7 @@ namespace Il2CppDumper
 
                 var cilGenerator = new CilGenerator(ilprocessor, methodDefinition, this);
                 cilGenerator.Generate(liftedOperations);
-                ReconstructExceptionHandling(blocks, cilGenerator, methodDefinition);
+                DummyAssemblyGenerator.ReconstructExceptionHandling(blocks, cilGenerator, methodDefinition);
 
                 Console.WriteLine($"[GenerateMethodBody] Successfully generated CIL for {methodDefinition.FullName}");
             }
@@ -823,7 +929,7 @@ namespace Il2CppDumper
             }
         }
 
-        private void GenerateFallbackBody(MethodDefinition methodDefinition, string errorMessage)
+        private static void GenerateFallbackBody(MethodDefinition methodDefinition, string errorMessage)
         {
             var ilProc = methodDefinition.Body.GetILProcessor();
             ilProc.Body.Instructions.Clear();
@@ -833,7 +939,7 @@ namespace Il2CppDumper
             ilProc.Emit(OpCodes.Throw);
         }
 
-        private void ReconstructExceptionHandling(List<IRBlock> blocks, CilGenerator cilGenerator, MethodDefinition methodDefinition)
+        private static void ReconstructExceptionHandling(List<IRBlock> blocks, CilGenerator cilGenerator, MethodDefinition methodDefinition)
         {
             // 1. Identify protected blocks (try blocks)
             var tryStarts = new List<IRBlock>();
@@ -890,6 +996,7 @@ namespace Il2CppDumper
                 }
             }
         }
+
         private GenericParameter CreateGenericParameter(Il2CppGenericParameter param, IGenericParameterProvider iGenericParameterProvider)
         {
             if (!genericParameterDic.TryGetValue(param, out var genericParameter))
@@ -944,14 +1051,15 @@ namespace Il2CppDumper
             }
             return new CustomAttributeArgument(typeReference, val);
         }
+
         public MethodDefinition ResolveMethodByVA(ulong va)
         {
             if (addressToMethodMap.TryGetValue(va, out var method))
-            {
                 return method;
-            }
+            Console.WriteLine($"[ResolveMethodByVA] No method found for VA: 0x{va:X}");
             return null;
         }
+
         private TypeReference GetBlobValueTypeReference(BlobValue blobValue, MemberReference memberReference)
         {
             if (blobValue.EnumType != null)
@@ -971,48 +1079,47 @@ namespace Il2CppDumper
             {
                 foreach (var module in assembly.Modules)
                 {
-                    foreach (var typeDef in module.GetAllTypes()) // Mono.Cecil.ModuleDefinition.GetAllTypes() возвращает все типы, включая вложенные
+                    // Получаем все типы включая вложенные
+                    foreach (var typeDef in module.GetAllTypes())
                     {
-                        if (!typeDef.HasProperties)
+                        if (!typeDef.HasProperties || !typeDef.HasFields)
                             continue;
 
                         var fieldsToRename = new List<(FieldDefinition field, string newName)>();
 
                         foreach (var propDef in typeDef.Properties)
                         {
-                            // Ищем стандартное имя для backing field (например, <PropertyName>k__BackingField)
+                            // Обычное имя для backing field автосвойства
                             var backingFieldName = $"<{propDef.Name}>k__BackingField";
+
+                            // Находим поле с таким именем
                             var field = typeDef.Fields.FirstOrDefault(f => f.Name == backingFieldName);
+                            if (field == null)
+                                continue;
 
-                            if (field != null)
+                            // Формируем новое имя
+                            string baseNewName = $"__prop_{propDef.Name}";
+
+                            // Проверяем на конфликт имен среди полей в этом типе (кроме самого текущего поля)
+                            if (typeDef.Fields.Any(f => f.Name == baseNewName && f != field))
                             {
-                                // Предлагаемое новое имя. Можно обсудить другой формат.
-                                // Например, сделать его приватным и назвать _propertyName
-                                string newName = $"__prop_{propDef.Name}";
-
-                                // Проверка на конфликт имен (маловероятно для такого префикса, но все же)
-                                if (typeDef.Fields.Any(f => f.Name == newName) && field.Name != newName)
+                                int counter = 1;
+                                string tempName;
+                                do
                                 {
-                                    // Если конфликт, добавляем суффикс
-                                    int counter = 1;
-                                    string tempName;
-                                    do
-                                    {
-                                        tempName = $"{newName}_{counter++}";
-                                    } while (typeDef.Fields.Any(f => f.Name == tempName));
-                                    newName = tempName;
-                                }
-                                fieldsToRename.Add((field, newName));
+                                    tempName = $"{baseNewName}_{counter++}";
+                                } while (typeDef.Fields.Any(f => f.Name == tempName && f != field));
+                                baseNewName = tempName;
                             }
+
+                            fieldsToRename.Add((field, baseNewName));
                         }
 
-                        foreach(var (field, newName) in fieldsToRename)
+                        // Переименовываем поля уже после обхода свойств,
+                        // чтобы не было конфликтов во время итерации
+                        foreach (var (field, newName) in fieldsToRename)
                         {
                             field.Name = newName;
-                            // Можно также рассмотреть изменение видимости поля на private,
-                            // так как backing fields обычно приватные.
-                            // field.IsPrivate = true;
-                            // field.IsPublic = false; // и т.д. в зависимости от исходной видимости
                         }
                     }
                 }

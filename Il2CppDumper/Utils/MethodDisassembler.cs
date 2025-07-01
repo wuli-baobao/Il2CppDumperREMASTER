@@ -26,6 +26,17 @@ namespace Il2CppDumper
     {
         public static List<DisassembledInstruction> Disassemble(byte[] codeBytes, ulong baseAddress, ArchitectureType architecture)
         {
+            if (codeBytes == null) throw new ArgumentNullException(nameof(codeBytes));
+            if (codeBytes.Length == 0)
+            {
+                Console.WriteLine("[MethodDisassembler] Empty codeBytes provided");
+                return new List<DisassembledInstruction>();
+            }
+            if (baseAddress == 0)
+            {
+                Console.WriteLine("[MethodDisassembler] Invalid base address");
+                return new List<DisassembledInstruction>();
+            }
             var instructionsResult = new List<DisassembledInstruction>();
             if (codeBytes == null || codeBytes.Length == 0) return instructionsResult;
 

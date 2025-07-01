@@ -245,19 +245,19 @@ namespace Il2CppDumper.lifting
                     return new TypeReference("System", "Object", _module, null);
                 }
 
-                if (_module.TypeSystem.Object == null)
+                var objectType = _module.TypeSystem.Object;
+                if (objectType == null)
                 {
                     Console.WriteLine("[SafeGetObjectType] Error: _module.TypeSystem.Object is null.");
-                    var fallbackRef = new TypeReference("System", "Object", _module, null);
-                    return fallbackRef;
+                    return new TypeReference("System", "Object", _module, _module.TypeSystem.CoreLibrary);
                 }
 
-                return _module.TypeSystem.Object;
+                return objectType;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[SafeGetObjectType] Exception occurred: {ex.Message}\nStackTrace: {ex.StackTrace}");
-                return new TypeReference("System", "Object", _module, null);
+                Console.WriteLine($"[SafeGetObjectType] Exception: {ex.Message}\nStackTrace: {ex.StackTrace}");
+                return new TypeReference("System", "Object", _module, _module?.TypeSystem?.CoreLibrary);
             }
         }
 

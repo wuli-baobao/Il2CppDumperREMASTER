@@ -116,14 +116,17 @@ namespace Il2CppDumper.UppdateLowCode
 
         private ulong GetLabelAddress(string label)
         {
-            if (label != null && label.StartsWith("L_"))
+            if (string.IsNullOrEmpty(label) || !label.StartsWith("L_"))
             {
-                var hexPart = label.Substring(2);
-                if (ulong.TryParse(hexPart, System.Globalization.NumberStyles.HexNumber, null, out var address))
-                {
-                    return address;
-                }
+                Console.WriteLine($"[GetLabelAddress] Invalid label: {label}");
+                return 0;
             }
+            var hexPart = label.Substring(2);
+            if (ulong.TryParse(hexPart, System.Globalization.NumberStyles.HexNumber, null, out var address))
+            {
+                return address;
+            }
+            Console.WriteLine($"[GetLabelAddress] Failed to parse label: {label}");
             return 0;
         }
     }
